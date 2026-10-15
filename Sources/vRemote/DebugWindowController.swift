@@ -1122,9 +1122,9 @@ private struct MappingRow: View {
         }
     }
 
-    /// Whether a held press of this gesture keeps firing.
-    private var repeatingGesture: RemoteGesture? {
-        mappings.repeatingGesture(for: button, remote: remote)
+    /// Whether a held press of one gesture keeps firing for this button.
+    private func repeats(_ gesture: RemoteGesture) -> Bool {
+        mappings.repeatsWhileHeld(for: button, remote: remote, gesture: gesture)
     }
 
     var body: some View {
@@ -1201,12 +1201,15 @@ private struct MappingRow: View {
             remote: remote,
             gesture: gesture
         )
-        // A slot mapped to a repeating action is not a second action, it is
-        // "hold to keep doing this". The repeat glyph and the green caption say
-        // so, because the slot otherwise reads like a long press and silently
-        // does the opposite of what it looks like.
-        let repeats = gesture != .tap && repeatingGesture == gesture
-        let armed = gesture == .tap || (assigned != nil && !repeats)
+        // A slot whose action repeats is the user saying "hold this to keep
+        // doing it", not a second action. The repeat glyph and the green
+        // caption say so, because the slot otherwise reads like an ordinary
+        // press and silently does something else.
+        let repeats = self.repeats(gesture)
+        // Whether this slot carries an action of its own, which is what the
+        // caption's weight and the spoken label report. A repeating long press
+        // much definitely has one.
+        let hasOwnAction = gesture == .tap || assigned != nil
 
         return HStack(spacing: 6) {
             HStack(spacing: 3) {
@@ -1284,7 +1287,7 @@ private struct MappingRow: View {
             "\(button.title), \(MappingRow.caption(gesture)), "
                 + (repeats
                     ? L10n.text("按住连发", "Repeats while held")
-                    : (armed
+                    : (hasOwnAction
                         ? mappings.targetTitle(for: button, remote: remote, gesture: gesture)
                         : L10n.text("未设置，同单击", "Not set, uses tap")))
         )

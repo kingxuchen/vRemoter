@@ -651,31 +651,70 @@ func runRemoteGestureSelfTests() {
         "the late press still reaches the target as one tap"
     )
 
-    // Setting the long press to the same action as the single tap is how a
-    // user says "hold this to repeat". Reading it as a separate long-press
-    // action would take the button off the repeating path — the opposite of
-    // what they set up — so it must not count as armed.
+    // Setting the long press to the same action as the single tap used to be
+    // the way to ask for "hold to repeat". Only the long press repeats now, so a
+    // long press on a repeating action is armed even when both slots name it —
+    // holding it does something the tap cannot.
     require(
-        RemoteGesture.armed(tap: "Delete", assigned: [.longPress: "Delete"])
-            == [],
-        "a long press on the same action as the tap means repeat, not a gesture"
+        RemoteGesture.armed(
+            tap: "Delete",
+            assigned: [.longPress: "Delete"],
+            repeats: { $0 == "Delete" }
+        ) == [.longPress],
+        "a long press on a repeating action is armed even when it matches the tap"
+    )
+    // A long press that only re-does the tap's one-shot action adds nothing, so
+    // it must not put the button on the slow path.
+    require(
+        RemoteGesture.armed(
+            tap: "Escape",
+            assigned: [.longPress: "Escape"],
+            repeats: { _ in false }
+        ) == [],
+        "a long press repeating a one-shot tap adds nothing and stays unarmed"
     )
     require(
-        RemoteGesture.armed(tap: "Escape", assigned: [.longPress: "Delete"])
-            == [.longPress],
+        RemoteGesture.armed(
+            tap: "Escape",
+            assigned: [.longPress: "Delete"],
+            repeats: { $0 == "Delete" }
+        ) == [.longPress],
         "a long press on a different action stays a gesture of its own"
-    )
-    require(
-        RemoteGesture.armed(tap: "Delete", assigned: [.longPress: nil])
-            == [],
-        "an unassigned long press is not armed either way"
     )
     require(
         RemoteGesture.armed(
             tap: "Delete",
-            assigned: [.doubleTap: "Delete", .longPress: nil]
+            assigned: [.longPress: nil],
+            repeats: { $0 == "Delete" }
+        ) == [],
+        "an unassigned long press is never armed"
+    )
+    require(
+        RemoteGesture.armed(
+            tap: "Delete",
+            assigned: [.doubleTap: "Delete", .longPress: nil],
+            repeats: { $0 == "Delete" }
         ) == [.doubleTap],
-        "a double tap on the tap's own action is still an armed gesture"
+        "a double tap is armed regardless of what it names"
+    )
+
+    // The rule the user set twice: a short press never repeats. Only the long
+    // press does, and only when the action it lands on repeats at all.
+    require(
+        !RemoteGesture.repeatsWhileHeld(gesture: .tap, actionRepeats: true),
+        "a single tap never repeats, even on a repeating action"
+    )
+    require(
+        !RemoteGesture.repeatsWhileHeld(gesture: .doubleTap, actionRepeats: true),
+        "a double tap never repeats"
+    )
+    require(
+        RemoteGesture.repeatsWhileHeld(gesture: .longPress, actionRepeats: true),
+        "a long press on a repeating action repeats"
+    )
+    require(
+        !RemoteGesture.repeatsWhileHeld(gesture: .longPress, actionRepeats: false),
+        "a long press on a one-shot action fires once"
     )
 
     print("PASS: a button with no extra gestures fires on the press")
@@ -686,10 +725,15 @@ func runRemoteGestureSelfTests() {
     print("PASS: a hold with no long-press mapping is not mistaken for one")
     print("PASS: the hold threshold wins over a pending tap")
     print("PASS: a press after the window starts a new gesture")
-    print("PASS: a long press matching the tap means repeat, not a gesture")
+    print("PASS: a long press on a repeating action is armed over a matching tap")
+    print("PASS: a long press repeating a one-shot tap stays unarmed")
     print("PASS: a long press on a different action stays its own gesture")
     print("PASS: an unassigned long press is never armed")
-    print("PASS: a double tap is still armed even when it matches the tap")
+    print("PASS: a double tap is armed regardless of what it names")
+    print("PASS: a single tap never repeats, even on a repeating action")
+    print("PASS: a double tap never repeats")
+    print("PASS: a long press on a repeating action repeats")
+    print("PASS: a long press on a one-shot action fires once")
 }
 
 runRemoteGestureSelfTests()

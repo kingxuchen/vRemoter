@@ -11,23 +11,39 @@ enum RemoteGesture: String, CaseIterable, Codable, Hashable, Identifiable {
 
     var id: String { rawValue }
 
+    /// Whether one gesture keeps firing while the button is held.
+    ///
+    /// Only the long press repeats. A short press is a short press: the tap
+    /// fires its action once and stops, so a button someone mapped to Delete
+    /// still deletes one character per tap and only keeps deleting when they
+    /// deliberately hold it.
+    static func repeatsWhileHeld(
+        gesture: RemoteGesture,
+        actionRepeats: Bool
+    ) -> Bool {
+        gesture == .longPress && actionRepeats
+    }
+
     /// The gestures the user has actually armed for a button.
     ///
     /// `assigned` holds only the gestures that were given something; the single
     /// tap is the fallback rather than an extra, so it is never listed.
     ///
-    /// A long press that resolves to the same action as the single tap is not a
-    /// separate gesture at all — the user is expressing "hold this to repeat
-    /// it". Counting it as armed would take the button off the repeating path,
-    /// which is the exact opposite of what they set up.
+    /// A long press that merely repeats the tap's own one-shot action adds
+    /// nothing, so it is not armed — that keeps a redundant assignment from
+    /// putting the button on the slow path. A long press on an action that
+    /// *does* repeat is armed even when both slots name it, because holding it
+    /// then does something the tap cannot.
     static func armed<Target: Equatable>(
         tap: Target,
-        assigned: [RemoteGesture: Target?]
+        assigned: [RemoteGesture: Target?],
+        repeats: (Target) -> Bool
     ) -> Set<RemoteGesture> {
         Set(
             RemoteGesture.allCases.filter { gesture in
                 guard let target = assigned[gesture] ?? nil else { return false }
-                return gesture != .longPress || target != tap
+                guard gesture == .longPress else { return true }
+                return target != tap || repeats(target)
             }
         )
     }

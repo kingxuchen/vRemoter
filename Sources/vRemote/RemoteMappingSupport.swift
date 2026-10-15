@@ -371,10 +371,9 @@ final class RemoteMappingStore: ObservableObject {
     /// Which gestures the user has armed for a button.
     ///
     /// Single tap is never listed: it is the fallback, not an extra the user
-    /// opts into. A long press that lands on the same action as the single tap
-    /// is not armed either — that pairing means "hold to repeat", and treating
-    /// it as armed would switch the button off from repeating, which is the
-    /// opposite of what the user set up.
+    /// opts into. A long press that merely repeats the tap's own one-shot action
+    /// is not listed either, because it adds nothing the tap does not already
+    /// do.
     func armedGestures(
         for button: RemoteButtonDefinition,
         remote: SupportedRemoteID
@@ -388,7 +387,11 @@ final class RemoteMappingStore: ObservableObject {
                 gesture: gesture
             )
         }
-        return RemoteGesture.armed(tap: tap, assigned: assigned)
+        return RemoteGesture.armed(
+            tap: tap,
+            assigned: assigned,
+            repeats: { RemoteMappingTarget.repeating.contains($0) }
+        )
     }
 
     func target(
@@ -453,43 +456,27 @@ final class RemoteMappingStore: ObservableObject {
         }
     }
 
-    /// Which gesture slot supplies the action a held button repeats.
+    /// Whether one slot's action keeps firing while the button is held, for this
+    /// button as configured now.
     ///
-    /// A repeating action repeats when either slot says so: the single tap
-    /// mapped to it, or the long press mapped to it. The long press is the slot
-    /// someone reaches for when they want "hold to do this" and the single tap
-    /// has to stay something else — holding the button to delete while a tap
-    /// still goes back. Reporting the slot rather than the target lets the
-    /// caller post that slot's action, so the other slot keeps its own meaning.
-    ///
-    /// Nil means the button keeps ordinary gesture behaviour.
-    func repeatingGesture(
+    /// Every answer comes from the two rules the user set: a short press never
+    /// repeats, and only Delete and the four arrows repeat at all.
+    func repeatsWhileHeld(
         for button: RemoteButtonDefinition,
-        remote: SupportedRemoteID
-    ) -> RemoteGesture? {
-        guard button.remappable, !button.voiceControlled else { return nil }
-
-        let longPress = explicitTarget(
-            for: button,
-            remote: remote,
-            gesture: .longPress
+        remote: SupportedRemoteID,
+        gesture: RemoteGesture
+    ) -> Bool {
+        guard button.remappable, !button.voiceControlled else { return false }
+        // The long press is the only slot that can be repeating, and only when
+        // it is actually armed — an unassigned or redundant one is not.
+        guard armedGestures(for: button, remote: remote).contains(gesture) else {
+            return false
+        }
+        let target = target(for: button, remote: remote, gesture: gesture)
+        return RemoteGesture.repeatsWhileHeld(
+            gesture: gesture,
+            actionRepeats: RemoteMappingTarget.repeating.contains(target)
         )
-        if let longPress, RemoteMappingTarget.repeating.contains(longPress) {
-            return .longPress
-        }
-
-        // A long press on some other action is a gesture of its own, so it wins
-        // over repeating whatever the single tap happens to be.
-        if longPress != nil { return nil }
-
-        // A double tap has to wait out its window, which a held key never
-        // reaches, so an armed one keeps the gesture path.
-        if explicitTarget(for: button, remote: remote, gesture: .doubleTap) != nil {
-            return nil
-        }
-        let tap = target(for: button, remote: remote)
-        guard RemoteMappingTarget.repeating.contains(tap) else { return nil }
-        return .tap
     }
 
     func targetTitle(
