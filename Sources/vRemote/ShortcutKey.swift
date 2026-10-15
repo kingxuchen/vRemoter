@@ -14,6 +14,7 @@ enum ShortcutKey {
     static let space: UInt16 = 0x31
     static let escape: UInt16 = 0x35
     static let v: UInt16 = 0x09
+    static let fn: UInt16 = 0x3F
 
     /// The left/right modifier keys, which macOS reports through flag changes
     /// rather than ordinary key presses.

@@ -13,23 +13,16 @@ enum RemoteMicrophoneOpenResult: Equatable {
     case failed(String)
 }
 
-protocol DoubaoAudioStateProviding: AnyObject {
-    var onSnapshotChanged: ((DoubaoAudioStateMonitor.Snapshot) -> Void)? {
-        get set
-    }
-
-    func start()
-    func stop()
-    func snapshotNow() -> DoubaoAudioStateMonitor.Snapshot
-}
-
-extension DoubaoAudioStateMonitor: DoubaoAudioStateProviding {}
-
-/// Coordinates the input-method toggle, supported remote gestures, and each
+/// Coordinates the voice trigger toggle, supported remote gestures, and each
 /// remote's independent ATVV transport.
 ///
+/// The session belongs to this type, not to any voice input application: a press
+/// opens the remote microphone and emits the user's shortcut, a second press
+/// emits it again and closes. Nothing is observed about which application is
+/// recording, so the shortcut works with whatever the user has configured.
+///
 /// A transport START/STOP is never itself a keyboard toggle. A physical
-/// keyboard trigger already reaches Doubao. A remote gesture synthesizes
+/// keyboard trigger already reaches the voice input app. A remote gesture synthesizes
 /// exactly one trigger only when it changes the intended recognition state.
 final class X6SessionCoordinator {
     private enum Phase: String {
@@ -45,12 +38,6 @@ final class X6SessionCoordinator {
         case keyboard
     }
 
-    private struct PhysicalVoiceGesture {
-        let beganAt: Date
-        let recognitionWasOpen: Bool
-        let generation: UInt64
-    }
-
     struct DebugSnapshot: Equatable {
         let phase: String
         let generation: UInt64
@@ -59,14 +46,18 @@ final class X6SessionCoordinator {
         let openRequestedRemote: VoiceRemoteID?
     }
 
-    private static let remoteHoldThreshold: TimeInterval = 0.55
-    private static let openConfirmationTimeout: TimeInterval = 1.0
-    private static let closeVerificationTimeout: TimeInterval = 1.2
     private static let maximumOpenAttempts = 3
 
-    private let doubaoState: any DoubaoAudioStateProviding
+    /// One physical press can be reported through more than one channel — an
+    /// X6 announces it over both BLE audio and HID. Two edges that close
+    /// together would toggle twice and leave the session unchanged, which
+    /// reads as a dead button, so edges inside this window count as one.
+    private static let pressEdgeDebounce: TimeInterval = 0.25
+    private static let openConfirmationTimeout: TimeInterval = 1.0
+
     private let setRemoteRouteActive: (Bool) -> Void
     private let triggerTap: () -> Void
+    private let triggerAvailable: () -> Bool
     private let now: () -> Date
 
     private var phase: Phase = .closed
@@ -76,7 +67,7 @@ final class X6SessionCoordinator {
     private var sessionRemote: VoiceRemoteID?
     private var streamingRemotes = Set<VoiceRemoteID>()
     private var openRequestedRemote: VoiceRemoteID?
-    private var physicalVoiceGestures = [VoiceRemoteID: PhysicalVoiceGesture]()
+    private var lastPressEdgeAt: Date?
 
     private var routeCloseWorkItem: DispatchWorkItem?
     private var startVerificationWorkItem: DispatchWorkItem?
@@ -91,7 +82,6 @@ final class X6SessionCoordinator {
     var onStateChanged: ((String) -> Void)?
 
     init(
-        doubaoState: any DoubaoAudioStateProviding,
         setRemoteRouteActive: @escaping (Bool) -> Void = {
             AudioPipe.shared.setRemoteActive($0)
         },
@@ -99,11 +89,12 @@ final class X6SessionCoordinator {
             guard let shortcut = AppStorage.shortcut else { return }
             Key.triggerTap(shortcut)
         },
+        triggerAvailable: @escaping () -> Bool = { AppStorage.shortcut != nil },
         now: @escaping () -> Date = Date.init
     ) {
-        self.doubaoState = doubaoState
         self.setRemoteRouteActive = setRemoteRouteActive
         self.triggerTap = triggerTap
+        self.triggerAvailable = triggerAvailable
         self.now = now
     }
 
@@ -117,122 +108,65 @@ final class X6SessionCoordinator {
         )
     }
 
-    func start() {
-        doubaoState.onSnapshotChanged = { [weak self] snapshot in
-            self?.handleDoubaoSnapshot(snapshot)
-        }
-        doubaoState.start()
-    }
+    func start() {}
 
     // MARK: - ATVV transport
 
-    func remoteAudioStarted(
-        remote: VoiceRemoteID,
-        reason: UInt8,
-        supportsPhysicalHoldGesture: Bool = false
-    ) {
-        let snapshot = doubaoState.snapshotNow()
-        let inserted = streamingRemotes.insert(remote).inserted
+    // MARK: - Toggle edges
+
+    /// One physical press of the remote voice key, however it was announced.
+    ///
+    /// Toggle, not hold-to-talk: this opens the session and emits the user's
+    /// shortcut, and the next press emits it again and closes. The remote's own
+    /// release is deliberately not a stop signal, because the user asked for a
+    /// toggle rather than a hold.
+    func voiceKeyPressed(remote: VoiceRemoteID, reason: UInt8 = 0) {
+        guard triggerAvailable() else {
+            print("[VOICE-SESSION] no shortcut configured; voice key ignored")
+            return
+        }
+        let at = now()
+        if let last = lastPressEdgeAt,
+           at.timeIntervalSince(last) < Self.pressEdgeDebounce
+        {
+            print(
+                "[VOICE-SESSION] duplicate press edge ignored " +
+                "remote=\(remote.rawValue) reason=" +
+                String(format: "0x%02x", reason)
+            )
+            return
+        }
+        lastPressEdgeAt = at
+
         if openRequestedRemote == remote {
             openRequestedRemote = nil
             openConfirmationWorkItem?.cancel()
             openConfirmationWorkItem = nil
         }
 
-        if phase == .closing {
-            print(
-                "[VOICE-SESSION] late AUDIO_START while closing " +
-                "remote=\(remote.rawValue) reason=" +
-                String(format: "0x%02x", reason)
-            )
-            closeAllRemoteTransports()
-            return
-        }
-
-        if supportsPhysicalHoldGesture, reason == 0x03 {
-            let recognitionWasOpen = phase == .open || snapshot.isRecording
-            if physicalVoiceGestures[remote] == nil {
-                physicalVoiceGestures[remote] = PhysicalVoiceGesture(
-                    beganAt: now(),
-                    recognitionWasOpen: recognitionWasOpen,
-                    generation: generation
-                )
-            }
-            print(
-                "[VOICE-SESSION] physical ATVV DOWN " +
-                "remote=\(remote.rawValue) " +
-                "recognitionWasOpen=\(recognitionWasOpen)"
-            )
-
-            if recognitionWasOpen {
-                sessionRemote = remote
-                activateRemoteRoute()
-                publish("遥控器按住录音中")
-                return
-            }
-        }
-
-        if !inserted {
-            print(
-                "[VOICE-SESSION] duplicate AUDIO_START ignored " +
-                "remote=\(remote.rawValue) reason=" +
-                String(format: "0x%02x", reason)
-            )
-            return
-        }
-
-        activateRemoteRoute()
-        print(
-            "[VOICE-SESSION] AUDIO_START remote=\(remote.rawValue) reason=" +
-            String(format: "0x%02x", reason) +
-            " phase=\(phase.rawValue) owner=\(owner.rawValue) " +
-            "doubaoBefore=\(snapshot.state.rawValue) " +
-            "device=\(snapshot.deviceSummary)"
-        )
-
         switch phase {
-        case .opening, .open:
-            publish("豆包录音中 · 遥控器已接入")
-
-        case .closed:
-            // Chromecast reserves reason 0x03 for a physical voice press, so
-            // a reason-0 stream while closed can only be a stale response to
-            // an earlier host request. X6 is different: its verified physical
-            // first press itself arrives as reason 0x00 and must remain a
-            // valid open gesture.
-            guard remote != .chromecast || reason != 0x00 else {
-                print(
-                    "[VOICE-SESSION] stale host AUDIO_START ignored " +
-                    "remote=\(remote.rawValue)"
-                )
-                closeAllRemoteTransports()
-                return
-            }
+        case .closed, .opening:
             beginOpening(
                 owner: .remote,
                 remote: remote,
                 sendTrigger: true,
-                requestTransportImmediately: false
+                requestTransportImmediately: true
             )
-            // beginOpening advances the session generation. Keep the
-            // in-flight physical gesture attached to that new session so its
-            // matching AUDIO_STOP can complete the tap/hold decision.
-            if supportsPhysicalHoldGesture,
-               reason == 0x03,
-               let gesture = physicalVoiceGestures[remote]
-            {
-                physicalVoiceGestures[remote] = PhysicalVoiceGesture(
-                    beganAt: gesture.beganAt,
-                    recognitionWasOpen: gesture.recognitionWasOpen,
-                    generation: generation
-                )
-            }
-
+        case .open:
+            beginClosing(sendTrigger: true, reason: "voice key toggle")
         case .closing:
-            break
+            // A press arriving mid-close is not a reversal. The user is most
+            // likely still letting go of the previous one.
+            print("[VOICE-SESSION] press edge while closing ignored")
         }
     }
 
+    /// The remote released its own button.
+    ///
+    /// Under toggle semantics this is only the tail of the press that already
+    /// opened the session, so it must not close anything. It does stop tracking
+    /// the remote's spontaneous stream, which is what `streamingRemotes`
+    /// records.
     func remoteAudioStopped(remote: VoiceRemoteID, reason: UInt8) {
         streamingRemotes.remove(remote)
         if openRequestedRemote == remote {
@@ -240,75 +174,27 @@ final class X6SessionCoordinator {
             openConfirmationWorkItem?.cancel()
             openConfirmationWorkItem = nil
         }
+        print(
+            "[VOICE-SESSION] remote released remote=\(remote.rawValue) " +
+            "reason=" + String(format: "0x%02x", reason) +
+            " phase=\(phase.rawValue) — session left as-is"
+        )
+    }
 
-        if reason == 0x02,
-           let gesture = physicalVoiceGestures.removeValue(forKey: remote)
-        {
-            let duration = now().timeIntervalSince(gesture.beganAt)
-            let wasHold = duration >= Self.remoteHoldThreshold
-            print(
-                String(
-                    format:
-                        "[VOICE-SESSION] physical ATVV UP remote=%@ " +
-                        "duration=%.3fs kind=%@ recognitionWasOpen=%@",
-                    remote.rawValue,
-                    duration,
-                    wasHold ? "HOLD" : "TAP",
-                    gesture.recognitionWasOpen ? "true" : "false"
-                )
-            )
-
-            guard gesture.generation == generation else {
-                print(
-                    "[VOICE-SESSION] stale physical release ignored " +
-                    "remote=\(remote.rawValue)"
-                )
-                return
-            }
-
-            if wasHold || gesture.recognitionWasOpen {
-                closeRecognitionFromRemote(
-                    reason: wasHold
-                        ? "ATVV HOLD release"
-                        : "ATVV TAP toggle"
-                )
-                return
-            }
-
-            // First Chromecast short tap: the physical stream ends at button
-            // release. Immediately request a persistent stream from that same
-            // remote. BLEBridge has already marked its local stream idle
-            // before invoking this callback, so no fixed delay is necessary.
-            guard phase == .opening || phase == .open else { return }
-            sessionRemote = remote
-            requestRemoteTransportOpen(
-                remote,
-                bypassDebounce: true,
-                attempt: 1
-            )
-            publish("豆包录音中 · 遥控器持续收音")
+    func remoteHIDShortPress() {
+        guard let remote = preferredRemoteProvider?() else {
+            print("[VOICE-SESSION] HID short press with no remote attached")
             return
         }
+        voiceKeyPressed(remote: remote)
+    }
 
-        print(
-            "[VOICE-SESSION] AUDIO_STOP remote=\(remote.rawValue) reason=" +
-            String(format: "0x%02x", reason) +
-            " phase=\(phase.rawValue)"
-        )
-
-        // Do not automatically reopen a generic transport STOP. X6 may emit
-        // it immediately before its HID toggle-off edge. Only the proven
-        // Chromecast physical-tap path above performs an immediate recovery.
-        if phase == .open || phase == .opening {
-            publish("豆包仍开启 · 遥控器音频已停止")
-        } else if streamingRemotes.isEmpty {
-            scheduleRouteClose(after: 0.08)
-        }
+    func remoteHIDLongPressEnded() {
+        print("[VOICE-SESSION] HID long release — session left as-is")
     }
 
     func remoteDisconnected(_ remote: VoiceRemoteID) {
         streamingRemotes.remove(remote)
-        physicalVoiceGestures.removeValue(forKey: remote)
         if openRequestedRemote == remote {
             openRequestedRemote = nil
             openRetryWorkItem?.cancel()
@@ -343,44 +229,19 @@ final class X6SessionCoordinator {
         scheduleOpenRetry(remote: remote, after: 0.20, attempt: 2)
     }
 
-    // MARK: - X6 HID completion
-
-    func remoteHIDShortPress() {
-        closeRecognitionFromRemote(reason: "HID SHORT")
-    }
-
-    func remoteHIDLongPressEnded() {
-        closeRecognitionFromRemote(reason: "HID LONG release")
-    }
-
     // MARK: - Physical keyboard trigger
 
-    /// Called before the real physical trigger reaches Doubao. It updates the
-    /// remote transport only; it never synthesizes a second keyboard event.
+    /// Called before the real physical trigger reaches its target application.
+    /// It moves the remote transport only; it never synthesizes a second
+    /// keyboard event, because the physical key is already going through.
     func triggerDownObserved(isSynthetic: Bool) {
         guard !isSynthetic else { return }
-        let snapshot = doubaoState.snapshotNow()
-        let shouldOpen: Bool
-        switch phase {
-        case .closed:
-            shouldOpen = !snapshot.isRecording
-        case .closing:
-            // A second deliberate physical trigger reverses the user's last
-            // intent even if CoreAudio has not published inactive yet.
-            shouldOpen = true
-        case .opening, .open:
-            shouldOpen = false
+        guard triggerAvailable() else {
+            print("[TRIGGER] no shortcut configured; key ignored")
+            return
         }
-
-        print(
-            "[TRIGGER] DOWN source=keyboard action=" +
-            (shouldOpen ? "open" : "close") +
-            " phase=\(phase.rawValue) " +
-            "doubaoBefore=\(snapshot.state.rawValue) " +
-            "device=\(snapshot.deviceSummary)"
-        )
-
-        if shouldOpen {
+        switch phase {
+        case .closed, .opening:
             guard let remote = preferredRemoteProvider?() else {
                 beginOpeningWithoutRemote()
                 return
@@ -391,8 +252,10 @@ final class X6SessionCoordinator {
                 sendTrigger: false,
                 requestTransportImmediately: true
             )
-        } else {
+        case .open:
             beginClosing(sendTrigger: false, reason: "keyboard trigger")
+        case .closing:
+            print("[TRIGGER] DOWN while closing ignored")
         }
     }
 
@@ -402,8 +265,6 @@ final class X6SessionCoordinator {
             "[TRIGGER] UP source=keyboard phase=\(phase.rawValue) " +
             "owner=\(owner.rawValue)"
         )
-        reconcileSoon(after: 0.03)
-        reconcileSoon(after: 0.15)
     }
 
     // MARK: - Lifecycle / manual control
@@ -414,100 +275,13 @@ final class X6SessionCoordinator {
         phase = .closed
         owner = .none
         sessionRemote = nil
-        physicalVoiceGestures.removeAll()
+        lastPressEdgeAt = nil
         closeRouteAndTransports()
         publish("已手动关闭")
     }
 
     func stop() {
         forceClose()
-        doubaoState.stop()
-    }
-
-    // MARK: - Doubao observation
-
-    private func handleDoubaoSnapshot(
-        _ snapshot: DoubaoAudioStateMonitor.Snapshot
-    ) {
-        switch snapshot.state {
-        case .active:
-            switch phase {
-            case .opening:
-                startVerificationWorkItem?.cancel()
-                startVerificationWorkItem = nil
-                phase = .open
-                activateRemoteRoute()
-                if let remote = sessionRemote,
-                   !streamingRemotes.contains(remote),
-                   openRequestedRemote != remote
-                {
-                    requestRemoteTransportOpen(
-                        remote,
-                        bypassDebounce: false,
-                        attempt: 1
-                    )
-                }
-                publish("豆包录音中 · \(snapshot.deviceSummary)")
-
-            case .open:
-                activateRemoteRoute()
-                publish("豆包录音中 · \(snapshot.deviceSummary)")
-
-            case .closing:
-                // CoreAudio can remain active briefly after the trigger has
-                // toggled Doubao off. Never reinterpret this stale edge as a
-                // fresh external opening.
-                print(
-                    "[VOICE-SESSION] active snapshot ignored while closing"
-                )
-
-            case .closed:
-                adoptExternalActivation(snapshot)
-            }
-
-        case .inactive:
-            switch phase {
-            case .opening:
-                // The opening verification owns this transient idle window.
-                break
-            case .open, .closing:
-                finalizeClosed(reason: "Doubao inactive")
-            case .closed:
-                if routeActive || !streamingRemotes.isEmpty {
-                    closeRouteAndTransports()
-                }
-            }
-            publish("豆包已就绪")
-
-        case .unavailable:
-            if phase != .opening {
-                finalizeClosed(reason: "Doubao unavailable")
-            }
-            publish("等待豆包输入法")
-        }
-    }
-
-    private func adoptExternalActivation(
-        _ snapshot: DoubaoAudioStateMonitor.Snapshot
-    ) {
-        generation &+= 1
-        cancelScheduledWork()
-        phase = .open
-        owner = .keyboard
-        sessionRemote = preferredRemoteProvider?()
-        activateRemoteRoute()
-        print(
-            "[VOICE-SESSION] Doubao external activation adopted " +
-            "device=\(snapshot.deviceSummary)"
-        )
-        if let remote = sessionRemote {
-            requestRemoteTransportOpen(
-                remote,
-                bypassDebounce: false,
-                attempt: 1
-            )
-        }
-        publish("豆包录音中 · \(snapshot.deviceSummary)")
     }
 
     // MARK: - State transitions
@@ -519,8 +293,7 @@ final class X6SessionCoordinator {
         owner = .keyboard
         sessionRemote = nil
         activateRemoteRoute()
-        scheduleStartVerification(for: generation)
-        publish("豆包正在启动 · 等待遥控器")
+        publish("语音输入已开启 · 等待遥控器")
     }
 
     private func beginOpening(
@@ -545,11 +318,14 @@ final class X6SessionCoordinator {
                 attempt: 1
             )
         }
-        scheduleStartVerification(for: generation)
+        // Nothing is left to confirm: this type owns the session, and there is
+        // no application whose state could be waited on. Linger in .opening
+        // would make the next press read as another open instead of a close.
+        phase = .open
         publish(
             owner == .keyboard
-                ? "豆包正在启动 · 遥控器已预热"
-                : "遥控器已启动 · 正在打开豆包"
+                ? "语音输入已开启 · 遥控器已预热"
+                : "语音输入已开启 · 遥控器已接入"
         )
     }
 
@@ -581,8 +357,7 @@ final class X6SessionCoordinator {
             triggerTap()
         }
         scheduleRouteClose(after: 0.10)
-        scheduleCloseVerification(for: generation)
-        publish("遥控器已结束 · 正在关闭豆包")
+        publish("正在结束语音输入")
         print(
             "[VOICE-SESSION] begin closing reason=\(reason) " +
             "trigger=\(sendTrigger ? "synthetic" : "physical")"
@@ -595,7 +370,6 @@ final class X6SessionCoordinator {
         phase = .closed
         owner = .none
         sessionRemote = nil
-        physicalVoiceGestures.removeAll()
         closeRouteAndTransports()
         print("[VOICE-SESSION] closed reason=\(reason)")
     }
@@ -734,73 +508,6 @@ final class X6SessionCoordinator {
     }
 
     // MARK: - Verification and route lifecycle
-
-    private func scheduleStartVerification(for expectedGeneration: UInt64) {
-        startVerificationWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self,
-                  self.generation == expectedGeneration,
-                  self.phase == .opening
-            else { return }
-            self.startVerificationWorkItem = nil
-            let snapshot = self.doubaoState.snapshotNow()
-            if snapshot.isRecording {
-                self.handleDoubaoSnapshot(snapshot)
-                return
-            }
-            self.finalizeClosed(reason: "opening timeout")
-            self.publish("豆包未启动 · 遥控器自动关闭")
-        }
-        startVerificationWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
-    }
-
-    private func scheduleCloseVerification(for expectedGeneration: UInt64) {
-        closeVerificationWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self,
-                  self.generation == expectedGeneration,
-                  self.phase == .closing
-            else { return }
-            self.closeVerificationWorkItem = nil
-            let snapshot = self.doubaoState.snapshotNow()
-            if snapshot.isRecording {
-                // The requested close did not become observable. Follow the
-                // real CoreAudio state without synthesizing another trigger.
-                self.phase = .open
-                self.owner = .keyboard
-                self.sessionRemote = self.preferredRemoteProvider?()
-                self.activateRemoteRoute()
-                if let remote = self.sessionRemote {
-                    self.requestRemoteTransportOpen(
-                        remote,
-                        bypassDebounce: false,
-                        attempt: 1
-                    )
-                }
-                self.publish("豆包仍在录音 · 请再次关闭")
-                print(
-                    "[VOICE-SESSION] close not observed; restored open state"
-                )
-            } else {
-                self.finalizeClosed(reason: "close verification")
-                self.publish("豆包已就绪")
-            }
-        }
-        closeVerificationWorkItem = work
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + Self.closeVerificationTimeout,
-            execute: work
-        )
-    }
-
-    private func reconcileSoon(after delay: TimeInterval) {
-        let expectedGeneration = generation
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, self.generation == expectedGeneration else { return }
-            self.handleDoubaoSnapshot(self.doubaoState.snapshotNow())
-        }
-    }
 
     private func activateRemoteRoute() {
         routeCloseWorkItem?.cancel()

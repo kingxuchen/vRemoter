@@ -377,6 +377,75 @@ func testShortcutMainKeyPressIsUnchangedByTheModifierRule() {
     )
 }
 
+func testShortcutReadsBackAFnMigratedFromTheOldPicker() {
+    // A 1.1.1 install can have stored Fn as its trigger. Fn is no longer
+    // offered for recording, but a migrated value still has to read back as
+    // something a person recognises rather than as a raw key code.
+    let migrated = Shortcut(keyCode: ShortcutKey.fn, modifierFlags: ShortcutModifier.function)
+    require(
+        migrated.displayText == "Fn / Globe",
+        "a migrated Fn trigger must read back by name, not as a key code"
+    )
+    require(
+        !migrated.displayText.contains("键码"),
+        "a migrated trigger must never show a raw key code to the user"
+    )
+}
+
+// MARK: - Storage round trip
+
+func testShortcutRecordedAfterTheAppHasReadIsNotIgnored() {
+    // Regression. The real sequence is: the app reads the shortcut at launch,
+    // the user then records a different one. A getter that memoised its
+    // migrated value kept serving the launch-time shortcut, so the console
+    // displayed the newly recorded key while the app actually emitted the old
+    // one — pressing the remote voice key fired the old key.
+    AppStorage.shortcut = nil
+    let atLaunch = AppStorage.shortcut
+
+    let recorded = Shortcut(
+        keyCode: ShortcutKey.rightCommand,
+        modifierFlags: ShortcutModifier.command
+    )
+    AppStorage.shortcut = recorded
+
+    require(
+        AppStorage.shortcut == recorded,
+        "a shortcut recorded after the first read must be served back"
+    )
+    require(
+        AppStorage.shortcut?.keyCode == ShortcutKey.rightCommand,
+        "the recorded key must not be replaced by the launch-time key"
+    )
+    _ = atLaunch
+
+    AppStorage.shortcut = nil
+    require(
+        AppStorage.shortcut == nil,
+        "clearing must be readable too, not just writing"
+    )
+}
+
+func testShortcutSurvivesBeingRewritten() {
+    AppStorage.shortcut = nil
+    _ = AppStorage.shortcut
+    let first = Shortcut(
+        keyCode: ShortcutKey.rightCommand,
+        modifierFlags: ShortcutModifier.command
+    )
+    let second = Shortcut(
+        keyCode: ShortcutKey.space,
+        modifierFlags: ShortcutModifier.option
+    )
+    AppStorage.shortcut = first
+    AppStorage.shortcut = second
+    require(
+        AppStorage.shortcut == second,
+        "the most recently recorded shortcut must win"
+    )
+    AppStorage.shortcut = nil
+}
+
 // MARK: - Shortcut self-test entry
 
 func runShortcutSelfTests() {
@@ -395,6 +464,9 @@ func runShortcutSelfTests() {
     testShortcutMatchesBareAndFlaggedFormOfOneModifier()
     testShortcutBareModifierStillProducesTwoDistinctEvents()
     testShortcutMainKeyPressIsUnchangedByTheModifierRule()
+    testShortcutReadsBackAFnMigratedFromTheOldPicker()
+    testShortcutRecordedAfterTheAppHasReadIsNotIgnored()
+    testShortcutSurvivesBeingRewritten()
 
     print("PASS: left/right variants stay distinct")
     print("PASS: combinations with a main key are representable")
@@ -411,6 +483,9 @@ func runShortcutSelfTests() {
     print("PASS: one modifier press is recognised however reported")
     print("PASS: a bare modifier still produces a press and a release")
     print("PASS: a combination press carries exactly its modifiers")
+    print("PASS: a migrated Fn trigger reads back by name")
+    print("PASS: a shortcut recorded after the first read is served back")
+    print("PASS: the most recently recorded shortcut wins")
 }
 
 runShortcutSelfTests()

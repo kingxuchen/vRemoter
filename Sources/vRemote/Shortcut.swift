@@ -87,6 +87,7 @@ struct Shortcut: Equatable {
         if modifierFlags & ShortcutModifier.command != 0 { symbols += "⌘" }
 
         if let side = Self.sideName(forKeyCode: keyCode) { return side }
+        if keyCode == ShortcutKey.fn { return Self.namesAlone[keyCode]! }
         if modifierFlags & ShortcutModifier.function != 0 { symbols += "fn" }
         return symbols + Self.keyName(forKeyCode: keyCode)
     }
@@ -111,8 +112,7 @@ struct Shortcut: Equatable {
         ShortcutKey.rightCommand: "右 Command",
     ]
 
-    private static let sideModifierFlags: [UInt16: UInt64] = [
-        ShortcutKey.leftShift: ShortcutModifier.shift,
+    private static let sideModifierFlags: [UInt16: UInt64] = [        ShortcutKey.leftShift: ShortcutModifier.shift,
         ShortcutKey.rightShift: ShortcutModifier.shift,
         ShortcutKey.leftControl: ShortcutModifier.control,
         ShortcutKey.rightControl: ShortcutModifier.control,
@@ -120,6 +120,15 @@ struct Shortcut: Equatable {
         ShortcutKey.rightOption: ShortcutModifier.option,
         ShortcutKey.leftCommand: ShortcutModifier.command,
         ShortcutKey.rightCommand: ShortcutModifier.command,
+    ]
+
+    /// Keys whose name is the whole label, so nothing is appended to it.
+    ///
+    /// Fn is here because a 1.1.1 install may have stored it as its trigger. It
+    /// is no longer offered for recording, but a migrated value still has to
+    /// read back as something a person recognises rather than a key code.
+    private static let namesAlone: [UInt16: String] = [
+        ShortcutKey.fn: "Fn / Globe",
     ]
 
     /// `kVK_ANSI_*` follows the US keyboard layout, not the alphabet: `V` is

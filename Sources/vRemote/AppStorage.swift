@@ -65,19 +65,30 @@ enum AppStorage {
     }
 
     static var shortcut: Shortcut? {
-        get { migratedShortcut }
+        get {
+            migrateIfNeeded()
+            return readShortcut()
+        }
         set { setShortcut(newValue) }
     }
 
-    /// Replaces the old fixed trigger picker.
+    private static var didMigrateShortcut = false
+
+    /// Runs the one-time migration from the old fixed trigger picker.
     ///
     /// The value read back through `UserDefaults.standard` cannot answer
-    /// whether a user ever chose a trigger, because `prepare()` registers a
-    /// default for the legacy key: every install, old or new, reports the same
+    /// whether a user ever chose a trigger, because `prepare()` used to register
+    /// a default for the legacy key: every install, old or new, reported the same
     /// value. So the decision reads the **persisted** domain instead, which
-    /// contains only what was actually written, and runs once.
-    private static let migratedShortcut: Shortcut? = {
-        if let stored = readShortcut() { return stored }
+    /// contains only what was actually written.
+    ///
+    /// Deliberately run-once-and-then-discarded rather than memoised: caching
+    /// the result meant a shortcut recorded later in the session was written to
+    /// storage but never read back, so the app kept firing the migrated key.
+    private static func migrateIfNeeded() {
+        guard !didMigrateShortcut else { return }
+        didMigrateShortcut = true
+        guard readShortcut() == nil else { return }
 
         let domain = persistedDomain
         let decision = ShortcutMigration.decide(
@@ -89,11 +100,10 @@ enum AppStorage {
         switch decision {
         case .stored(let shortcut), .legacyImplicit(let shortcut):
             setShortcut(shortcut)
-            return shortcut
         case .freshInstall:
-            return nil
+            break
         }
-    }()
+    }
 
     private static func readShortcut() -> Shortcut? {
         guard let stored = UserDefaults.standard.dictionary(

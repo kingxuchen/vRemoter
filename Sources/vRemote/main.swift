@@ -46,9 +46,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let chromecastHID = ChromecastRemoteHIDBridge()
     private let x6SearchSuppressor = X6SearchSuppressor()
     private let doubaoAudioState = DoubaoAudioStateMonitor()
-    private lazy var x6Session = X6SessionCoordinator(
-        doubaoState: doubaoAudioState
-    )
+    private lazy var x6Session = X6SessionCoordinator()
     private let debugWindow = DebugWindowController()
     private let updateWindow = UpdateWindowController()
     private let x6BLE = BLEBridge(
@@ -187,10 +185,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         x6BLE.onAudioStarted = { [weak self] reason, _ in
             self?.lastVoiceRemote = .x6
-            self?.x6Session.remoteAudioStarted(
-                remote: .x6,
-                reason: reason
-            )
+            self?.x6Session.voiceKeyPressed(remote: .x6, reason: reason)
         }
         x6BLE.onAudioStopped = { [weak self] reason in
             self?.x6Session.remoteAudioStopped(remote: .x6, reason: reason)
@@ -240,11 +235,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         chromecastBLE.onAudioStarted = { [weak self] reason, _ in
             self?.lastVoiceRemote = .chromecast
-            self?.x6Session.remoteAudioStarted(
-                remote: .chromecast,
-                reason: reason,
-                supportsPhysicalHoldGesture: true
-            )
+            self?.x6Session.voiceKeyPressed(remote: .chromecast, reason: reason)
         }
         chromecastBLE.onAudioStopped = { [weak self] reason in
             self?.x6Session.remoteAudioStopped(

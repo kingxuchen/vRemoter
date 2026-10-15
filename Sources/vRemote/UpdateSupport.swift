@@ -216,10 +216,16 @@ private final class UpdateWindowModel: ObservableObject {
     private let service: GitHubUpdateService
     private static let automaticUpdatesKey = "vRemoter.automaticUpdates"
 
+    /// Defaults to off.
+    ///
+    /// The app used to look itself up on the server shortly after launch, which
+    /// meant a user running a build they were testing on could have it replaced
+    /// underneath them. Checking is still one menu item away (版本与更新…), and
+    /// this switch turns the background check back on for anyone who wants it.
     var automaticUpdates: Bool {
         get {
             let defaults = UserDefaults.standard
-            guard defaults.object(forKey: Self.automaticUpdatesKey) != nil else { return true }
+            guard defaults.object(forKey: Self.automaticUpdatesKey) != nil else { return false }
             return defaults.bool(forKey: Self.automaticUpdatesKey)
         }
         set {
