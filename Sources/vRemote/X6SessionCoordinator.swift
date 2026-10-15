@@ -177,8 +177,24 @@ final class X6SessionCoordinator {
         print(
             "[VOICE-SESSION] remote released remote=\(remote.rawValue) " +
             "reason=" + String(format: "0x%02x", reason) +
-            " phase=\(phase.rawValue) — session left as-is"
+            " phase=\(phase.rawValue)"
         )
+
+        // The remote's own stream is welded to its button, so releasing ends it.
+        // Under a toggle the session has to outlive the button, so ask the same
+        // remote to keep its microphone open.
+        //
+        // Without this the initial open request is swallowed as "already
+        // streaming" — at press time the remote is streaming by itself — and
+        // nothing is left to restart it once the button comes up, which looks
+        // exactly like hold-to-talk.
+        guard phase == .open, let active = sessionRemote else { return }
+        guard active == remote || streamingRemotes.isEmpty else { return }
+        print(
+            "[VOICE-SESSION] re-requesting persistent stream remote=" +
+            "\(active.rawValue) after physical release"
+        )
+        requestRemoteTransportOpen(active, bypassDebounce: true, attempt: 1)
     }
 
     func remoteHIDShortPress() {

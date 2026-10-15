@@ -95,6 +95,8 @@ enum VoiceSessionSelfTest {
         testFirstPressOpensAndEmits(checks)
         testSecondPressClosesAndEmits(checks)
         testReleaseDoesNotClose(checks)
+        testReleaseReRequestsThePersistentStream(checks)
+        testCloseStopsReRequesting(checks)
         testDuplicateEdgesToggleOnce(checks)
         testRapidDoublePressRoundTrips(checks)
         testKeyboardOpenAndRemoteClose(checks)
@@ -134,6 +136,39 @@ enum VoiceSessionSelfTest {
         c.expect(h.triggerTapCount == 1, "releasing must not emit a second shortcut")
         c.expect(h.coordinator.debugSnapshot.phase == "open", "releasing must not close the session")
         c.expect(h.routeChanges == [true], "releasing must not drop the audio route")
+    }
+
+    private static func testReleaseReRequestsThePersistentStream(_ c: CheckContext) {
+        // Regression. The remote streams by itself while its button is down, so
+        // the open request made on the press comes back "already streaming" and
+        // no MIC_OPEN is ever sent. Once the button is up the remote stops, and
+        // without asking again the microphone stays shut — which reads to the
+        // user as hold-to-talk, the exact behaviour they asked to remove.
+        let h = Harness()
+        h.pressVoiceKey()
+        c.expect(h.openRequests.count == 1, "the press asks once")
+        h.releaseVoiceKey()
+        c.expect(h.openRequests.count == 2, "the release must ask again for a persistent stream")
+        c.expect(
+            h.openRequests.last?.1 == true,
+            "the re-request bypasses the transport debounce"
+        )
+        c.expect(
+            h.coordinator.debugSnapshot.openRequestedRemote == .chromecast,
+            "the re-request becomes the pending open"
+        )
+    }
+
+    private static func testCloseStopsReRequesting(_ c: CheckContext) {
+        let h = Harness()
+        h.pressVoiceKey()
+        h.secondPress()
+        let before = h.openRequests.count
+        h.releaseVoiceKey()
+        c.expect(
+            h.openRequests.count == before,
+            "a release after the user stopped must not reopen the microphone"
+        )
     }
 
     private static func testDuplicateEdgesToggleOnce(_ c: CheckContext) {
