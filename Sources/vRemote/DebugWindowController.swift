@@ -961,7 +961,7 @@ private struct KeyMappingView: View {
         HStack(spacing: 14) {
             VStack(spacing: 10) {
                 RemoteProductImage(kind: selectedDevice)
-                    .frame(width: 128)
+                    .frame(width: 104)
                 Text(selectedDevice == .chromecast
                     ? L10n.text("14 个可映射键", "14 mappable buttons")
                     : L10n.text("15 个正面可映射键", "15 mappable front buttons"))
@@ -980,18 +980,13 @@ private struct KeyMappingView: View {
                 Spacer()
             }
             .padding(.top, 14)
-            .frame(width: 130)
+            .frame(width: 96)
             Divider().overlay(ConsoleTheme.lineSoft)
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(selectedDevice.title)
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(ConsoleTheme.text)
-                        Text(L10n.text("点击右侧菜单修改按键", "Use each menu to assign a key"))
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(ConsoleTheme.tertiary)
-                    }
+                HStack(alignment: .firstTextBaseline) {
+                    Text(selectedDevice.title)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(ConsoleTheme.text)
                     Spacer()
                     Toggle(
                         L10n.text("启用映射", "Enable"),
@@ -1003,6 +998,17 @@ private struct KeyMappingView: View {
                     .toggleStyle(.switch)
                     .controlSize(.small)
                 }
+                // Its own line, under the full panel width. Sharing the row with
+                // the switch left it so little room that it wrapped into the
+                // switch's space.
+                Text(L10n.text(
+                    "单击一个动作，双击与长按可另设；删除与方向键按住连发",
+                    "One action for a tap, more for double and hold. Delete and arrows repeat while held"
+                ))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(ConsoleTheme.tertiary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
                 Divider().overlay(ConsoleTheme.lineSoft)
                 ScrollView {
                     LazyVStack(spacing: 6) {
@@ -1014,6 +1020,12 @@ private struct KeyMappingView: View {
                             )
                         }
                     }
+                    // The scroll indicator draws over the content, which used to
+                    // land on the pickers' chevrons.
+                    .padding(.trailing, 10)
+                    // The last row was left half-cut against the footer, which
+                    // read as a clipping bug rather than as "there is more".
+                    .padding(.bottom, 10)
                 }
                 HStack {
                     if !mappings.isEnabled(selectedDevice) {
@@ -1086,89 +1098,194 @@ private struct DeviceSelectionRow: View {
 
 private struct MappingRow: View {
     @ObservedObject private var mappings = RemoteMappingStore.shared
-    @State private var showRecorder = false
+    @State private var recordingGesture: RemoteGesture?
     let remote: SupportedRemoteID
     let button: RemoteButtonDefinition
     let enabled: Bool
 
+    /// Single tap always exists; the other two are opt-in per button.
+    private static let gestures: [RemoteGesture] = [.tap, .doubleTap, .longPress]
+
+    private static func caption(_ gesture: RemoteGesture) -> String {
+        switch gesture {
+        case .tap: L10n.text("单击", "Tap")
+        case .doubleTap: L10n.text("双击", "Double")
+        case .longPress: L10n.text("长按", "Hold")
+        }
+    }
+
+    /// Whether a held press of this gesture keeps firing.
+    private var repeatingGesture: RemoteGesture? {
+        mappings.repeatingGesture(for: button, remote: remote)
+    }
+
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             Image(systemName: button.symbol)
-                .frame(width: 18)
+                // Sized to its frame on purpose: an SF Symbol at the
+                // environment's default size overflows an 18pt box and gets its
+                // arrow sliced off by the frame.
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 18, height: 22)
                 .foregroundStyle(button.voiceControlled ? ConsoleTheme.green : ConsoleTheme.secondary)
             Text(button.title)
                 .font(.system(size: 11.5, weight: .medium))
                 .foregroundStyle(ConsoleTheme.text)
-                .frame(width: 76, alignment: .leading)
-            Spacer(minLength: 4)
+                .lineLimit(1)
+                // The same 22pt band the icon and the first gesture row use.
+                // Top-aligned with two different heights, the icon centred in
+                // its taller frame and sat below the text's optical centre.
+                .frame(width: 72, height: 22, alignment: .leading)
             if !button.remappable {
                 Text(L10n.text("设备内部功能", "Device-only function"))
                     .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.tertiary)
+                    .frame(height: 24)
             } else if button.voiceControlled {
                 Text(RemoteMappingTarget.voiceInput.title)
                     .font(.system(size: 11))
                     .foregroundStyle(ConsoleTheme.green)
+                    .frame(height: 24)
             } else {
-                HStack(spacing: 4) {
-                    Picker(
-                        button.title,
-                        selection: Binding(
-                            get: { mappings.target(for: button, remote: remote) },
-                            set: { target in
-                                if target == .custom {
-                                    showRecorder = true
-                                } else {
-                                    mappings.setTarget(target, for: button, remote: remote)
-                                }
-                            }
-                        )
-                    ) {
-                        ForEach(RemoteMappingTarget.allCases.filter { $0 != .voiceInput }) { target in
-                            Text(
-                                target == .custom
-                                    ? mappings.targetTitle(for: button, remote: remote)
-                                    : target.title
-                            ).tag(target)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 142)
-                    if mappings.target(for: button, remote: remote) == .custom {
-                        Button { showRecorder = true } label: {
-                            Image(systemName: "record.circle")
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(ConsoleTheme.green)
-                        .help(L10n.text("重新录制按键", "Record again"))
+                VStack(spacing: 5) {
+                    ForEach(Self.gestures, id: \.self) { gesture in
+                        gestureRow(gesture)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(height: 28)
-        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .padding(.horizontal, 10)
         .background(ConsoleTheme.surface2)
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .accessibilityElement(children: .combine)
-        .sheet(isPresented: $showRecorder) {
+        .accessibilityElement(children: .contain)
+        .sheet(item: $recordingGesture) { gesture in
             KeyboardShortcutCaptureView(
                 buttonTitle: button.title,
-                onCancel: { showRecorder = false },
+                gestureCaption: Self.caption(gesture),
+                onCancel: { recordingGesture = nil },
                 onSave: { shortcut in
                     mappings.setCustomShortcut(
                         shortcut,
                         for: button,
-                        remote: remote
+                        remote: remote,
+                        gesture: gesture
                     )
-                    showRecorder = false
+                    recordingGesture = nil
                 }
             )
         }
+    }
+
+    /// One gesture's picker for one button.
+    ///
+    /// Single tap is what the button always does. The other two start disarmed
+    /// and fall back to the single-tap mapping until something is assigned, so
+    /// arming a long press can never cost the user their short press.
+    ///
+    /// The picker takes the width that is left rather than a fixed one: a fixed
+    /// width plus a long label overflowed the card and the scroll view clipped
+    /// the chevron off the right edge.
+    private func gestureRow(_ gesture: RemoteGesture) -> some View {
+        let assigned = mappings.explicitTarget(
+            for: button,
+            remote: remote,
+            gesture: gesture
+        )
+        // A slot mapped to a repeating action is not a second action, it is
+        // "hold to keep doing this". The repeat glyph and the green caption say
+        // so, because the slot otherwise reads like a long press and silently
+        // does the opposite of what it looks like.
+        let repeats = gesture != .tap && repeatingGesture == gesture
+        let armed = gesture == .tap || (assigned != nil && !repeats)
+
+        return HStack(spacing: 6) {
+            HStack(spacing: 3) {
+                Text(MappingRow.caption(gesture))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(repeats ? ConsoleTheme.green : ConsoleTheme.secondary)
+                if repeats {
+                    Image(systemName: "repeat")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(ConsoleTheme.green)
+                }
+            }
+            .frame(width: 44, alignment: .leading)
+            .help(repeats
+                ? L10n.text("按住会连发", "Repeats while held")
+                : "")
+            Picker(
+                "\(button.title) \(MappingRow.caption(gesture))",
+                selection: Binding(
+                    get: {
+                        assigned ?? (gesture == .tap ? button.defaultTarget : nil)
+                    },
+                    set: { target in
+                        guard let target else {
+                            mappings.clearGesture(
+                                gesture,
+                                for: button,
+                                remote: remote
+                            )
+                            return
+                        }
+                        if target == .custom {
+                            recordingGesture = gesture
+                        } else {
+                            mappings.setTarget(
+                                target,
+                                for: button,
+                                remote: remote,
+                                gesture: gesture
+                            )
+                        }
+                    }
+                )
+            ) {
+                if gesture != .tap {
+                    Text(L10n.text("同单击", "Uses tap"))
+                        .tag(RemoteMappingTarget?.none)
+                }
+                ForEach(RemoteMappingTarget.allCases.filter { $0 != .voiceInput }) { target in
+                    Text(
+                        target == .custom
+                            ? mappings.targetTitle(
+                                for: button,
+                                remote: remote,
+                                gesture: gesture
+                            )
+                            : target.title
+                    ).tag(RemoteMappingTarget?.some(target))
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+            if assigned == .custom {
+                Button { recordingGesture = gesture } label: {
+                    Image(systemName: "record.circle")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(ConsoleTheme.green)
+                .help(L10n.text("重新录制按键", "Record again"))
+            }
+        }
+        .frame(height: 22)
+        .accessibilityLabel(
+            "\(button.title), \(MappingRow.caption(gesture)), "
+                + (repeats
+                    ? L10n.text("按住连发", "Repeats while held")
+                    : (armed
+                        ? mappings.targetTitle(for: button, remote: remote, gesture: gesture)
+                        : L10n.text("未设置，同单击", "Not set, uses tap")))
+        )
     }
 }
 
 private struct KeyboardShortcutCaptureView: View {
     let buttonTitle: String
+    var gestureCaption = L10n.text("单击", "Tap")
     let onCancel: () -> Void
     let onSave: (RemoteCustomShortcut) -> Void
     @State private var captured: RemoteCustomShortcut?
@@ -1179,8 +1296,8 @@ private struct KeyboardShortcutCaptureView: View {
                 Text(L10n.text("录制键盘按键", "Record Keyboard Key"))
                     .font(.system(size: 20, weight: .semibold))
                 Text(L10n.text(
-                    "为“\(buttonTitle)”按下一个按键或组合键。",
-                    "Press a key or shortcut for “\(buttonTitle)”."
+                    "为“\(buttonTitle)”的\(gestureCaption)按下一个按键或组合键。",
+                    "Press a key or shortcut for \(gestureCaption.lowercased()) on “\(buttonTitle)”."
                 ))
                     .font(.system(size: 13))
                     .foregroundStyle(ConsoleTheme.secondary)

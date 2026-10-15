@@ -14,6 +14,7 @@ swiftc \
   "$SCRIPT_DIR/Sources/vRemote/AppStorage.swift" \
   "$SCRIPT_DIR/Sources/vRemote/Shortcut.swift" \
   "$SCRIPT_DIR/Sources/vRemote/ShortcutMigration.swift" \
+  "$SCRIPT_DIR/Sources/vRemote/RemoteGesture.swift" \
   "$SCRIPT_DIR/SelfTests/main.swift" \
   -o "$OUTPUT"
 "$OUTPUT"

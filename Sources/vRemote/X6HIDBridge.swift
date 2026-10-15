@@ -81,6 +81,7 @@ final class X6HIDBridge {
     private var voiceReportCount = 0
     private var voiceByteCount = 0
     private var remappingEnabled = RemoteMappingStore.shared.isEnabled(.x6)
+    private lazy var arbiter = RemoteGestureArbiter(remote: .x6)
     private var mappedKeyboardUsages = Set<UInt8>()
     private var passthroughKeyboardUsages = Set<UInt8>()
     private var lastKeyboardModifiers: UInt8 = 0
@@ -205,6 +206,7 @@ final class X6HIDBridge {
         guard let activeDevice, CFEqual(activeDevice, device) else { return }
         self.activeDevice = nil
         lastConsumerUsage = 0
+        arbiter.reset()
         onConnectionChanged?(false)
         print("[X6] disconnected")
     }
@@ -315,12 +317,11 @@ final class X6HIDBridge {
         guard let button = RemoteProfiles.x6Buttons.first(
             where: { $0.id == buttonID }
         ) else { return }
-        let store = RemoteMappingStore.shared
-        store.post(button: button, remote: .x6, isDown: isDown)
+        arbiter.edge(button: button, isDown: isDown)
         print(
             "[X6-MAP] \(button.title) " +
             "\(isDown ? "DOWN" : "UP") -> " +
-            store.targetTitle(for: button, remote: .x6)
+            RemoteMappingStore.shared.targetTitle(for: button, remote: .x6)
         )
     }
 

@@ -61,6 +61,7 @@ final class ChromecastRemoteHIDBridge {
     private var manager: IOHIDManager?
     private var activeDevice: IOHIDDevice?
     private var remappingEnabled = RemoteMappingStore.shared.isEnabled(.chromecast)
+    private lazy var arbiter = RemoteGestureArbiter(remote: .chromecast)
     private var lastButtonID: String?
 
     func start() {
@@ -161,6 +162,7 @@ final class ChromecastRemoteHIDBridge {
     fileprivate func deviceDidRemove(_ device: IOHIDDevice) {
         guard let activeDevice, CFEqual(activeDevice, device) else { return }
         self.activeDevice = nil
+        arbiter.reset()
         onConnectionChanged?(false)
         print("[CAST-HID] disconnected")
     }
@@ -194,12 +196,11 @@ final class ChromecastRemoteHIDBridge {
                 where: { $0.id == buttonID }
               )
         else { return }
-        let store = RemoteMappingStore.shared
-        store.post(button: button, remote: .chromecast, isDown: isDown)
+        arbiter.edge(button: button, isDown: isDown)
         print(
             "[CAST-MAP] \(button.title) " +
             "\(isDown ? "DOWN" : "UP") -> " +
-            store.targetTitle(for: button, remote: .chromecast)
+            RemoteMappingStore.shared.targetTitle(for: button, remote: .chromecast)
         )
     }
 }

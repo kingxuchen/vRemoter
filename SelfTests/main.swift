@@ -518,6 +518,182 @@ func testConsumerAnswerReportsHeldAndUnknown() {
 
 // MARK: - Shortcut self-test entry
 
+func runRemoteGestureSelfTests() {
+    let classifier = RemoteGestureClassifier()
+
+    // A button with nothing extra assigned is decided by the press itself, so
+    // it must not pay any latency. This is the behaviour every already-mapped
+    // button has today.
+    var plain = RemoteGestureClassifier.State()
+    require(
+        classifier.press(armed: [], at: 10, state: &plain) == .emit([.tap]),
+        "a button with no gestures of its own fires on the press"
+    )
+    require(
+        classifier.release(armed: [], at: 10.1, state: &plain) == .wait,
+        "a plain button does not fire again on its release"
+    )
+
+    // A double tap is one action, not two taps.
+    var doubled = RemoteGestureClassifier.State()
+    require(
+        classifier.press(armed: [.doubleTap], at: 20, state: &doubled) == .wait,
+        "a double-tap button waits on the first press"
+    )
+    require(
+        classifier.release(armed: [.doubleTap], at: 20.05, state: &doubled) == .wait,
+        "a double-tap button still waits after the first release"
+    )
+    require(
+        classifier.tick(armed: [.doubleTap], at: 20.2, state: &doubled) == .wait,
+        "no tap is emitted before the double-tap window closes"
+    )
+    require(
+        classifier.press(armed: [.doubleTap], at: 20.3, state: &doubled) == .emit([.doubleTap]),
+        "the second press in the window is one double tap"
+    )
+    require(
+        classifier.release(armed: [.doubleTap], at: 20.35, state: &doubled) == .wait,
+        "the second release adds nothing after a double tap"
+    )
+
+    // A lone press on a double-tap button still has to reach the target, once,
+    // and only once the window has closed.
+    var abandoned = RemoteGestureClassifier.State()
+    require(
+        classifier.press(armed: [.doubleTap], at: 30, state: &abandoned) == .wait,
+        "a double-tap button waits before knowing what it was"
+    )
+    _ = classifier.release(armed: [.doubleTap], at: 30.05, state: &abandoned)
+    require(
+        classifier.tick(armed: [.doubleTap], at: 30.5, state: &abandoned) == .emit([.tap]),
+        "an unmatched press becomes a tap once the window closes"
+    )
+    require(
+        classifier.tick(armed: [.doubleTap], at: 31, state: &abandoned) == .wait,
+        "the tap is emitted once, not repeated"
+    )
+
+    // A long press reports while the button is still down, so the user is not
+    // left waiting for the release.
+    var held = RemoteGestureClassifier.State()
+    require(
+        classifier.press(armed: [.longPress], at: 40, state: &held) == .wait,
+        "a long-press button waits on the press"
+    )
+    require(
+        classifier.tick(armed: [.longPress], at: 40.2, state: &held) == .wait,
+        "nothing is emitted before the hold threshold"
+    )
+    require(
+        classifier.tick(armed: [.longPress], at: 40.3, state: &held) == .emit([.longPress]),
+        "the hold threshold reports a long press without waiting for release"
+    )
+    require(
+        classifier.release(armed: [.longPress], at: 40.9, state: &held) == .wait,
+        "the release after a long press does not also report a tap"
+    )
+
+    // The timer and the release race: whoever notices first must say the same
+    // thing, or a press held just past the threshold flickers between gestures.
+    var racing = RemoteGestureClassifier.State()
+    _ = classifier.press(armed: [.longPress], at: 50, state: &racing)
+    require(
+        classifier.release(armed: [.longPress], at: 50.29, state: &racing)
+            == .emit([.longPress]),
+        "a release just past the threshold is still a long press"
+    )
+
+    // A long hold with no long-press mapping must not steal the tap. It still
+    // waits out the double-tap window, because that is the only thing keeping a
+    // genuine slow double tap from arriving as two taps.
+    var notHeld = RemoteGestureClassifier.State()
+    _ = classifier.press(armed: [.doubleTap], at: 60, state: &notHeld)
+    require(
+        classifier.release(armed: [.doubleTap], at: 60.6, state: &notHeld) == .wait,
+        "a long hold with no long-press mapping is not mistaken for one"
+    )
+    require(
+        classifier.tick(armed: [.doubleTap], at: 61, state: &notHeld) == .emit([.tap]),
+        "the tap still arrives after the double-tap window closes"
+    )
+
+    // Both gestures on one button: the hold must win over the pending tap, or
+    // holding a button would fire its short press too.
+    var both = RemoteGestureClassifier.State()
+    require(
+        classifier.press(armed: [.longPress, .doubleTap], at: 70, state: &both) == .wait,
+        "a button with both gestures still waits on the press"
+    )
+    require(
+        classifier.tick(armed: [.longPress, .doubleTap], at: 70.3, state: &both)
+            == .emit([.longPress]),
+        "the hold threshold wins over a pending tap"
+    )
+    _ = classifier.release(armed: [.longPress, .doubleTap], at: 70.5, state: &both)
+    require(
+        classifier.tick(armed: [.longPress, .doubleTap], at: 71, state: &both) == .wait,
+        "the long press leaves no tap behind it"
+    )
+
+    // A second press after the window is a new gesture, not the second half.
+    var slow = RemoteGestureClassifier.State()
+    _ = classifier.press(armed: [.doubleTap], at: 80, state: &slow)
+    _ = classifier.release(armed: [.doubleTap], at: 80.05, state: &slow)
+    _ = classifier.tick(armed: [.doubleTap], at: 80.5, state: &slow)
+    require(
+        classifier.press(armed: [.doubleTap], at: 81, state: &slow) == .wait,
+        "a press well after the window starts a new gesture"
+    )
+    _ = classifier.release(armed: [.doubleTap], at: 81.05, state: &slow)
+    require(
+        classifier.tick(armed: [.doubleTap], at: 81.5, state: &slow) == .emit([.tap]),
+        "the late press still reaches the target as one tap"
+    )
+
+    // Setting the long press to the same action as the single tap is how a
+    // user says "hold this to repeat". Reading it as a separate long-press
+    // action would take the button off the repeating path — the opposite of
+    // what they set up — so it must not count as armed.
+    require(
+        RemoteGesture.armed(tap: "Delete", assigned: [.longPress: "Delete"])
+            == [],
+        "a long press on the same action as the tap means repeat, not a gesture"
+    )
+    require(
+        RemoteGesture.armed(tap: "Escape", assigned: [.longPress: "Delete"])
+            == [.longPress],
+        "a long press on a different action stays a gesture of its own"
+    )
+    require(
+        RemoteGesture.armed(tap: "Delete", assigned: [.longPress: nil])
+            == [],
+        "an unassigned long press is not armed either way"
+    )
+    require(
+        RemoteGesture.armed(
+            tap: "Delete",
+            assigned: [.doubleTap: "Delete", .longPress: nil]
+        ) == [.doubleTap],
+        "a double tap on the tap's own action is still an armed gesture"
+    )
+
+    print("PASS: a button with no extra gestures fires on the press")
+    print("PASS: a double tap is one action, not two taps")
+    print("PASS: an unmatched press still becomes a tap, exactly once")
+    print("PASS: a long press reports while the button is still down")
+    print("PASS: a release just past the threshold is still a long press")
+    print("PASS: a hold with no long-press mapping is not mistaken for one")
+    print("PASS: the hold threshold wins over a pending tap")
+    print("PASS: a press after the window starts a new gesture")
+    print("PASS: a long press matching the tap means repeat, not a gesture")
+    print("PASS: a long press on a different action stays its own gesture")
+    print("PASS: an unassigned long press is never armed")
+    print("PASS: a double tap is still armed even when it matches the tap")
+}
+
+runRemoteGestureSelfTests()
+
 func runShortcutSelfTests() {
     testShortcutDistinguishesLeftFromRight()
     testShortcutCarriesCombinationWithMainKey()

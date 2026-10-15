@@ -115,6 +115,15 @@ enum RemoteMappingTarget: String, CaseIterable, Identifiable, Codable, Hashable 
     case volumeDown
     case mute
     case playPause
+    case nextTrack
+    case previousTrack
+    case fastForward
+    case rewind
+    case launchPanel
+    case eject
+    case mediaMenu
+    case forwardDelete
+    case contextKey
     case showDesktop
     case spotlight
     case commandC
@@ -145,6 +154,15 @@ enum RemoteMappingTarget: String, CaseIterable, Identifiable, Codable, Hashable 
         case .volumeDown: L10n.text("系统音量－", "System Volume Down")
         case .mute: L10n.text("系统静音", "System Mute")
         case .playPause: L10n.text("播放/暂停", "Play / Pause")
+        case .nextTrack: L10n.text("下一曲", "Next Track")
+        case .previousTrack: L10n.text("上一曲", "Previous Track")
+        case .fastForward: L10n.text("快进", "Fast Forward")
+        case .rewind: L10n.text("快退", "Rewind")
+        case .launchPanel: L10n.text("调度中心", "Launchpad")
+        case .eject: L10n.text("推出", "Eject")
+        case .mediaMenu: L10n.text("菜单", "Menu")
+        case .forwardDelete: L10n.text("前进删除", "Forward Delete")
+        case .contextKey: L10n.text("菜单键", "Context Menu Key")
         case .showDesktop: L10n.text("显示桌面", "Show Desktop")
         case .spotlight: "Spotlight (⌘Space)"
         case .commandC: L10n.text("复制 (⌘C)", "Copy (⌘C)")
@@ -153,6 +171,23 @@ enum RemoteMappingTarget: String, CaseIterable, Identifiable, Codable, Hashable 
         case .custom: L10n.text("录制任意按键…", "Record a key…")
         }
     }
+
+    /// The actions that keep firing while a button is held.
+    ///
+    /// Delete and the four arrows are the ones a person holds rather than taps:
+    /// holding Backspace eats text a character at a time, and holding an arrow
+    /// scrolls. Everything else is a switch — you press it or you do not — and
+    /// repeating it would be noise.
+    ///
+    /// Forward delete is deliberately absent: it removes a word per press, so
+    /// repeating it shreds text instead of clearing it.
+    static let repeating: Set<RemoteMappingTarget> = [
+        .deleteBackward,
+        .arrowUp,
+        .arrowDown,
+        .arrowLeft,
+        .arrowRight,
+    ]
 
     var keyboard: (keyCode: CGKeyCode, flags: CGEventFlags)? {
         switch self {
@@ -169,6 +204,8 @@ enum RemoteMappingTarget: String, CaseIterable, Identifiable, Codable, Hashable 
         case .end: (0x77, [])
         case .pageUp: (0x74, [])
         case .pageDown: (0x79, [])
+        case .forwardDelete: (0x75, [])
+        case .contextKey: (0x6E, [])
         case .showDesktop: (0x67, [.maskSecondaryFn])
         case .spotlight: (0x31, [.maskCommand])
         case .commandC: (0x08, [.maskCommand])
@@ -184,6 +221,13 @@ enum RemoteMappingTarget: String, CaseIterable, Identifiable, Codable, Hashable 
         case .volumeDown: 1
         case .mute: 7
         case .playPause: 16
+        case .nextTrack: 17
+        case .previousTrack: 18
+        case .fastForward: 19
+        case .rewind: 20
+        case .launchPanel: 13
+        case .eject: 14
+        case .mediaMenu: 25
         default: nil
         }
     }
@@ -264,14 +308,96 @@ final class RemoteMappingStore: ObservableObject {
         revision += 1
     }
 
+    /// The key one button's mapping is stored under.
+    ///
+    /// Single-tap keeps the pre-gesture unsuffixed key so mappings written by an
+    /// earlier build keep working untouched; the other gestures get a suffix.
+    private func mappingKey(
+        _ gesture: RemoteGesture,
+        for button: RemoteButtonDefinition,
+        remote: SupportedRemoteID
+    ) -> String {
+        let base = prefix + remote.rawValue + "." + button.id
+        guard gesture != .tap else { return base }
+        return base + "." + gesture.rawValue
+    }
+
+    private func customKey(
+        _ gesture: RemoteGesture,
+        for button: RemoteButtonDefinition,
+        remote: SupportedRemoteID
+    ) -> String {
+        let base = customPrefix + remote.rawValue + "." + button.id
+        guard gesture != .tap else { return base }
+        return base + "." + gesture.rawValue
+    }
+
+    /// The target explicitly stored for one gesture, or nil when the user has
+    /// assigned nothing to it.
+    ///
+    /// Single tap falls back to the button's own default so an untouched button
+    /// still does what the remote says on the box.
+    func explicitTarget(
+        for button: RemoteButtonDefinition,
+        remote: SupportedRemoteID,
+        gesture: RemoteGesture
+    ) -> RemoteMappingTarget? {
+        guard !button.voiceControlled, button.remappable else { return nil }
+        let key = mappingKey(gesture, for: button, remote: remote)
+        guard let raw = defaults.string(forKey: key),
+              let target = RemoteMappingTarget(rawValue: raw)
+        else {
+            return gesture == .tap ? button.defaultTarget : nil
+        }
+        return target
+    }
+
+    /// What one gesture actually fires.
+    ///
+    /// A double tap or long press that was never assigned falls back to the
+    /// single-tap mapping rather than doing nothing, so adding a long press
+    /// cannot silently cost the user their short press.
+    func target(
+        for button: RemoteButtonDefinition,
+        remote: SupportedRemoteID,
+        gesture: RemoteGesture
+    ) -> RemoteMappingTarget {
+        if let explicit = explicitTarget(for: button, remote: remote, gesture: gesture) {
+            return explicit
+        }
+        return target(for: button, remote: remote)
+    }
+
+    /// Which gestures the user has armed for a button.
+    ///
+    /// Single tap is never listed: it is the fallback, not an extra the user
+    /// opts into. A long press that lands on the same action as the single tap
+    /// is not armed either — that pairing means "hold to repeat", and treating
+    /// it as armed would switch the button off from repeating, which is the
+    /// opposite of what the user set up.
+    func armedGestures(
+        for button: RemoteButtonDefinition,
+        remote: SupportedRemoteID
+    ) -> Set<RemoteGesture> {
+        let tap = target(for: button, remote: remote)
+        var assigned: [RemoteGesture: RemoteMappingTarget?] = [:]
+        for gesture in RemoteGesture.allCases where gesture != .tap {
+            assigned[gesture] = explicitTarget(
+                for: button,
+                remote: remote,
+                gesture: gesture
+            )
+        }
+        return RemoteGesture.armed(tap: tap, assigned: assigned)
+    }
+
     func target(
         for button: RemoteButtonDefinition,
         remote: SupportedRemoteID
     ) -> RemoteMappingTarget {
         guard !button.voiceControlled else { return .voiceInput }
         guard button.remappable else { return .disabled }
-        let key = prefix + remote.rawValue + "." + button.id
-        guard let raw = defaults.string(forKey: key),
+        guard let raw = defaults.string(forKey: mappingKey(.tap, for: button, remote: remote)),
               let target = RemoteMappingTarget(rawValue: raw)
         else { return button.defaultTarget }
         return target
@@ -280,70 +406,151 @@ final class RemoteMappingStore: ObservableObject {
     func setTarget(
         _ target: RemoteMappingTarget,
         for button: RemoteButtonDefinition,
-        remote: SupportedRemoteID
+        remote: SupportedRemoteID,
+        gesture: RemoteGesture = .tap
     ) {
         guard !button.voiceControlled, button.remappable else { return }
         defaults.set(
             target.rawValue,
-            forKey: prefix + remote.rawValue + "." + button.id
+            forKey: mappingKey(gesture, for: button, remote: remote)
         )
+        revision += 1
+    }
+
+    /// Disarms one gesture, so the button goes back to behaving as if it were
+    /// the only kind of press.
+    func clearGesture(
+        _ gesture: RemoteGesture,
+        for button: RemoteButtonDefinition,
+        remote: SupportedRemoteID
+    ) {
+        guard gesture != .tap else { return }
+        defaults.removeObject(forKey: mappingKey(gesture, for: button, remote: remote))
+        defaults.removeObject(forKey: customKey(gesture, for: button, remote: remote))
         revision += 1
     }
 
     func customShortcut(
         for button: RemoteButtonDefinition,
-        remote: SupportedRemoteID
+        remote: SupportedRemoteID,
+        gesture: RemoteGesture = .tap
     ) -> RemoteCustomShortcut? {
-        let key = customPrefix + remote.rawValue + "." + button.id
-        guard let data = defaults.data(forKey: key) else { return nil }
+        guard let data = defaults.data(forKey: customKey(gesture, for: button, remote: remote))
+        else { return nil }
         return try? JSONDecoder().decode(RemoteCustomShortcut.self, from: data)
     }
 
     func setCustomShortcut(
         _ shortcut: RemoteCustomShortcut,
         for button: RemoteButtonDefinition,
-        remote: SupportedRemoteID
+        remote: SupportedRemoteID,
+        gesture: RemoteGesture = .tap
     ) {
-        let key = customPrefix + remote.rawValue + "." + button.id
+        let key = customKey(gesture, for: button, remote: remote)
         if let data = try? JSONEncoder().encode(shortcut) {
             defaults.set(data, forKey: key)
-            setTarget(.custom, for: button, remote: remote)
+            setTarget(.custom, for: button, remote: remote, gesture: gesture)
         }
+    }
+
+    /// Which gesture slot supplies the action a held button repeats.
+    ///
+    /// A repeating action repeats when either slot says so: the single tap
+    /// mapped to it, or the long press mapped to it. The long press is the slot
+    /// someone reaches for when they want "hold to do this" and the single tap
+    /// has to stay something else — holding the button to delete while a tap
+    /// still goes back. Reporting the slot rather than the target lets the
+    /// caller post that slot's action, so the other slot keeps its own meaning.
+    ///
+    /// Nil means the button keeps ordinary gesture behaviour.
+    func repeatingGesture(
+        for button: RemoteButtonDefinition,
+        remote: SupportedRemoteID
+    ) -> RemoteGesture? {
+        guard button.remappable, !button.voiceControlled else { return nil }
+
+        let longPress = explicitTarget(
+            for: button,
+            remote: remote,
+            gesture: .longPress
+        )
+        if let longPress, RemoteMappingTarget.repeating.contains(longPress) {
+            return .longPress
+        }
+
+        // A long press on some other action is a gesture of its own, so it wins
+        // over repeating whatever the single tap happens to be.
+        if longPress != nil { return nil }
+
+        // A double tap has to wait out its window, which a held key never
+        // reaches, so an armed one keeps the gesture path.
+        if explicitTarget(for: button, remote: remote, gesture: .doubleTap) != nil {
+            return nil
+        }
+        let tap = target(for: button, remote: remote)
+        guard RemoteMappingTarget.repeating.contains(tap) else { return nil }
+        return .tap
     }
 
     func targetTitle(
         for button: RemoteButtonDefinition,
-        remote: SupportedRemoteID
+        remote: SupportedRemoteID,
+        gesture: RemoteGesture = .tap
     ) -> String {
-        let value = target(for: button, remote: remote)
+        let value = target(for: button, remote: remote, gesture: gesture)
         if value == .custom,
-           let shortcut = customShortcut(for: button, remote: remote) {
+           let shortcut = customShortcut(for: button, remote: remote, gesture: gesture) {
             return shortcut.label
         }
         return value.title
     }
 
+    /// Emits one half of a mapped key press.
+    ///
+    /// A held key is one `isDown: true` followed by one `isDown: false`; extra
+    /// `isDown: true` calls in between are what the target app reads as an
+    /// auto-repeat, because no key-up separates them. A media target already
+    /// posts its whole press-and-release on `isDown: true`, so repeating it is
+    /// just calling this again.
     func post(
         button: RemoteButtonDefinition,
         remote: SupportedRemoteID,
+        gesture: RemoteGesture = .tap,
         isDown: Bool
     ) {
-        let value = target(for: button, remote: remote)
+        let value = target(for: button, remote: remote, gesture: gesture)
         if value == .custom {
-            customShortcut(for: button, remote: remote)?.post(isDown: isDown)
+            customShortcut(for: button, remote: remote, gesture: gesture)?
+                .post(isDown: isDown)
         } else {
             value.post(isDown: isDown)
         }
     }
 
+    /// Emits one complete press of the button's mapped action.
+    ///
+    /// A gesture is decided at an instant rather than spanning the physical
+    /// press — a long press fires while the button is still down — so the down
+    /// and the up are emitted together here instead of on the remote's edges.
+    func fire(
+        button: RemoteButtonDefinition,
+        remote: SupportedRemoteID,
+        gesture: RemoteGesture
+    ) {
+        post(button: button, remote: remote, gesture: gesture, isDown: true)
+        post(button: button, remote: remote, gesture: gesture, isDown: false)
+    }
+
     func reset(_ remote: SupportedRemoteID) {
         for button in RemoteProfiles.buttons(for: remote) {
-            defaults.removeObject(
-                forKey: prefix + remote.rawValue + "." + button.id
-            )
-            defaults.removeObject(
-                forKey: customPrefix + remote.rawValue + "." + button.id
-            )
+            for gesture in RemoteGesture.allCases {
+                defaults.removeObject(
+                    forKey: mappingKey(gesture, for: button, remote: remote)
+                )
+                defaults.removeObject(
+                    forKey: customKey(gesture, for: button, remote: remote)
+                )
+            }
         }
         revision += 1
     }
