@@ -37,15 +37,35 @@ perl -0777 -pi -e '
   /gex;
 ' "$EXECUTABLE"
 
+# The factory UUID is chosen by BlackHole's own release and changes between
+# versions, so read it from the driver that is actually installed instead of
+# hardcoding one. A pinned UUID builds fine against the version it was written
+# for and then fails on every other machine.
+SOURCE_FACTORY=$(plutil -convert json -o - "$PLIST" | python3 -c '
+import json, sys
+print(next(iter(json.load(sys.stdin)["CFPlugInFactories"])))
+')
+TARGET_FACTORY="B7C4C615-9E72-4C83-A329-71C4E50E4A91"
+AUDIO_TYPE="443ABAB8-E7B3-491A-B985-BEB9187030DB"
+
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier audio.local.vRemoteDriver2chXX" "$PLIST"
 /usr/libexec/PlistBuddy -c "Set :CFBundleName vRemote Driver" "$PLIST"
-/usr/libexec/PlistBuddy -c "Delete :CFPlugInFactories:9CAC157F-784A-4552-A1DE-0B9840FC974C" "$PLIST"
-/usr/libexec/PlistBuddy -c "Add :CFPlugInFactories:B7C4C615-9E72-4C83-A329-71C4E50E4A91 string BlackHole_Create" "$PLIST"
-/usr/libexec/PlistBuddy -c "Set :CFPlugInTypes:443ABAB8-E7B3-491A-B985-BEB9187030DB:0 B7C4C615-9E72-4C83-A329-71C4E50E4A91" "$PLIST"
+
+if [[ "$SOURCE_FACTORY" != "$TARGET_FACTORY" ]]; then
+  /usr/libexec/PlistBuddy -c "Delete :CFPlugInFactories:$SOURCE_FACTORY" "$PLIST" \
+    || print "note: no factory $SOURCE_FACTORY to replace"
+  /usr/libexec/PlistBuddy -c "Delete :CFPlugInTypes:$AUDIO_TYPE:0" "$PLIST" \
+    || print "note: no type entry $AUDIO_TYPE:0 to replace"
+  /usr/libexec/PlistBuddy \
+    -c "Add :CFPlugInFactories:$TARGET_FACTORY string BlackHole_Create" "$PLIST"
+  /usr/libexec/PlistBuddy \
+    -c "Add :CFPlugInTypes:$AUDIO_TYPE:0 string $TARGET_FACTORY" "$PLIST"
+fi
 
 codesign --force --deep --sign - --timestamp=none "$OUTPUT_DRIVER"
 
 print "Built: $OUTPUT_DRIVER"
 print "Bundle ID: $(defaults read "$PLIST" CFBundleIdentifier)"
+print "Factory UUID: $TARGET_FACTORY (was $SOURCE_FACTORY)"
 print "Architectures: $(lipo -archs "$EXECUTABLE")"
 codesign --verify --deep --strict --verbose=2 "$OUTPUT_DRIVER"
