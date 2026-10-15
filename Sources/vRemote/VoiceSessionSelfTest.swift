@@ -99,6 +99,8 @@ enum VoiceSessionSelfTest {
         testCloseStopsReRequesting(checks)
         testCloseSettlesBackToClosed(checks)
         testRepeatedTogglesKeepWorking(checks)
+        testTransportAcknowledgementIsNotAPress(checks)
+        testBothRemotesStillPressOnceEach(checks)
         testDuplicateEdgesToggleOnce(checks)
         testRapidDoublePressRoundTrips(checks)
         testKeyboardOpenAndRemoteClose(checks)
@@ -283,6 +285,52 @@ enum VoiceSessionSelfTest {
             )
         }
         c.expect(h.openRequests.count == 2, "each open asks for the microphone once")
+    }
+
+
+    private static func testTransportAcknowledgementIsNotAPress(_ c: CheckContext) {
+        // Regression. The remote answers a host mic-open request with an
+        // AUDIO_START. On a Chromecast that arrives as reason 0x00, while a real
+        // press is 0x03, so treating every AUDIO_START as a press made each open
+        // immediately followed by a close.
+        let h = Harness()
+        h.pressVoiceKey(.chromecast, reason: 0x03)
+        c.expect(h.coordinator.debugSnapshot.phase == "open", "a Chromecast 0x03 press opens")
+
+        h.advance(1.0)
+        h.coordinator.voiceKeyPressed(remote: .chromecast, reason: 0x00)
+        c.expect(
+            h.coordinator.debugSnapshot.phase == "open",
+            "a Chromecast 0x00 is a transport acknowledgement and must not toggle"
+        )
+        c.expect(
+            h.triggerTapCount == 1,
+            "an acknowledgement must not emit the shortcut again"
+        )
+    }
+
+    private static func testBothRemotesStillPressOnceEach(_ c: CheckContext) {
+        // The physical-press reason differs per remote, so a rule that only fits
+        // one of them would silently break the other.
+        let chromecast = Harness()
+        chromecast.pressVoiceKey(.chromecast, reason: 0x03)
+        c.expect(
+            chromecast.coordinator.debugSnapshot.phase == "open",
+            "Chromecast still opens on its own press reason"
+        )
+
+        let x6 = Harness()
+        x6.pressVoiceKey(.x6, reason: 0x00)
+        c.expect(
+            x6.coordinator.debugSnapshot.phase == "open",
+            "X6 still opens on its own press reason"
+        )
+        x6.advance(1.0)
+        x6.coordinator.voiceKeyPressed(remote: .x6, reason: 0x03)
+        c.expect(
+            x6.coordinator.debugSnapshot.phase == "open",
+            "X6 treats 0x03 as an acknowledgement, not a second press"
+        )
     }
 
     private static func testDebouncedRetry(_ c: CheckContext) {

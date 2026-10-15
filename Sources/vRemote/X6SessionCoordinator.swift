@@ -52,6 +52,24 @@ final class X6SessionCoordinator {
     /// X6 announces it over both BLE audio and HID. Two edges that close
     /// together would toggle twice and leave the session unchanged, which
     /// reads as a dead button, so edges inside this window count as one.
+    /// The ATVV reason code that means "a person pressed the button".
+    ///
+    /// The two remotes disagree, which is why this cannot be a shared constant.
+    /// Chromecast reserves 0x03 for a physical press and answers a host mic-open
+    /// request with 0x00; X6 sends its verified physical press as 0x00. Without
+    /// this distinction every persistent-stream request is acknowledged with an
+    /// AUDIO_START that reads as another press, so each open is immediately
+    /// followed by a close and the button appears to do nothing.
+    private static func isPhysicalPress(
+        remote: VoiceRemoteID,
+        reason: UInt8
+    ) -> Bool {
+        switch remote {
+        case .chromecast: reason == 0x03
+        case .x6: reason == 0x00
+        }
+    }
+
     private static let pressEdgeDebounce: TimeInterval = 0.25
     private static let openConfirmationTimeout: TimeInterval = 1.0
 
@@ -121,6 +139,14 @@ final class X6SessionCoordinator {
     /// release is deliberately not a stop signal, because the user asked for a
     /// toggle rather than a hold.
     func voiceKeyPressed(remote: VoiceRemoteID, reason: UInt8 = 0) {
+        guard Self.isPhysicalPress(remote: remote, reason: reason) else {
+            print(
+                "[VOICE-SESSION] transport acknowledgement, not a press " +
+                "remote=\(remote.rawValue) reason=" +
+                String(format: "0x%02x", reason)
+            )
+            return
+        }
         guard triggerAvailable() else {
             print("[VOICE-SESSION] no shortcut configured; voice key ignored")
             return
