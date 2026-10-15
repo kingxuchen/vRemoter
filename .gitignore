@@ -17,3 +17,6 @@ Driver/build/
 uuid.txt
 x6-uuid.txt
 Recordings/
+
+# verification skill evidence
+.verification/
