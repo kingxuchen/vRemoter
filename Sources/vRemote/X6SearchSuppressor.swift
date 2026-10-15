@@ -59,7 +59,7 @@ final class X6SearchSuppressor {
 
             if isSynthetic {
                 print(
-                    "[X6-FILTER] delivered synthetic Option " +
+                    "[X6-FILTER] delivered synthetic trigger " +
                     "type=\(type.rawValue) " +
                     "flags=0x\(String(event.flags.rawValue, radix: 16))"
                 )
@@ -73,9 +73,10 @@ final class X6SearchSuppressor {
             let isSearchKey =
                 (type == .keyDown || type == .keyUp) && keyCode == 0xB1
             let isSearchSystemEvent = type.rawValue == 14
-            let trigger = AppStorage.inputTriggerKey
             let isDelayedX6Trigger = type == .flagsChanged
-                && trigger.keyCodes.contains(keyCode)
+                && AppStorage.shortcut?.matches(
+                    keyCode: UInt16(truncatingIfNeeded: keyCode)
+                ) == true
             if isArmed && (
                 isSearchKey || isSearchSystemEvent || isDelayedX6Trigger
             ) {
@@ -125,7 +126,8 @@ final class X6SearchSuppressor {
 
     func triggerConfigurationDidChange() {
         triggerKeysDown.removeAll()
-        print("[INPUT-TRIGGER] listening for \(AppStorage.inputTriggerKey.title)")
+        let listened = AppStorage.shortcut?.displayText ?? "未设置"
+        print("[INPUT-TRIGGER] listening for \(listened)")
     }
 
     func stop() {
@@ -147,8 +149,9 @@ final class X6SearchSuppressor {
         // before posting. Observing them again here would execute the same
         // microphone transition twice.
         guard !isSynthetic else { return }
-        let trigger = AppStorage.inputTriggerKey
-        guard trigger.keyCodes.contains(keyCode) else { return }
+        guard let shortcut = AppStorage.shortcut,
+              shortcut.matches(keyCode: UInt16(truncatingIfNeeded: keyCode))
+        else { return }
 
         // macOS normally reports modifier edges as `flagsChanged`, but on
         // some keyboards/input-method paths the DOWN edge arrives as a plain
@@ -162,15 +165,16 @@ final class X6SearchSuppressor {
         case .keyUp:
             isDown = false
         case .flagsChanged:
-            // When another Option key remains held, maskAlternate stays set
-            // even while this key is released. The per-key set is therefore
-            // a more reliable release signal than the aggregate flag alone.
+            // When another key sharing the same modifier stays held, the flag
+            // remains set even while this key is released. The per-key set is
+            // therefore a more reliable release signal than the flag alone.
             if triggerKeysDown.contains(keyCode) {
                 isDown = false
             } else {
-                guard event.flags.contains(trigger.flag) else {
+                let modifier = CGEventFlags(rawValue: shortcut.modifierFlags)
+                guard modifier.isEmpty || event.flags.contains(modifier) else {
                     print(
-                        "[OPTION-RAW] orphan UP ignored keyCode=0x" +
+                        "[TRIGGER-RAW] orphan UP ignored keyCode=0x" +
                         String(keyCode, radix: 16)
                     )
                     return
@@ -182,7 +186,7 @@ final class X6SearchSuppressor {
         }
 
         print(
-            "[OPTION-RAW] type=\(type.rawValue) " +
+            "[TRIGGER-RAW] type=\(type.rawValue) " +
             "keyCode=0x\(String(keyCode, radix: 16)) " +
             "edge=\(isDown ? "DOWN" : "UP")"
         )

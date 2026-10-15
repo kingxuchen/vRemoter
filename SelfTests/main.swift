@@ -274,6 +274,109 @@ func testShortcutMigrationFallsBackOnUnrecognisedLegacyValue() {
     )
 }
 
+// MARK: - Toggle shape and observation
+
+/// Stands in for the real CoreGraphics poster so the toggle's shape can be
+/// asserted without touching the system event layer.
+private final class CountingPoster: ShortcutEventPosting {
+    private(set) var posted: [ShortcutKeyEvent] = []
+    private(set) var markers: [Int64] = []
+
+    func post(_ event: ShortcutKeyEvent, marker: Int64) {
+        posted.append(event)
+        markers.append(marker)
+    }
+}
+
+func testShortcutTapSequenceIsPressThenRelease() {
+    let rightCommand = Shortcut(keyCode: ShortcutKey.rightCommand, modifierFlags: 0)
+    let sequence = rightCommand.tapSequence()
+
+    require(sequence.count == 2, "a toggle is exactly two events")
+    require(
+        sequence[0] == rightCommand.downEvent(),
+        "the first event is the press"
+    )
+    require(
+        sequence[1] == rightCommand.upEvent(),
+        "the second event is the release"
+    )
+    require(
+        sequence[0] != sequence[1],
+        "press and release must differ, or the target app cannot see a toggle"
+    )
+}
+
+func testShortcutMatchesItsOwnKeyAndNotOthers() {
+    let rightCommand = Shortcut(
+        keyCode: ShortcutKey.rightCommand,
+        modifierFlags: ShortcutModifier.command
+    )
+    require(
+        rightCommand.matches(keyCode: ShortcutKey.rightCommand),
+        "a shortcut must match its own key"
+    )
+    require(
+        !rightCommand.matches(keyCode: ShortcutKey.leftCommand),
+        "right Command must not be satisfied by left Command"
+    )
+    require(
+        !rightCommand.matches(keyCode: ShortcutKey.space),
+        "a shortcut must not match an unrelated key"
+    )
+}
+
+func testShortcutMatchesBareAndFlaggedFormOfOneModifier() {
+    // The event tap may report a modifier press either bare or with its own
+    // flag set. Both are the same physical press, so the observer must accept
+    // either rather than silently missing the press.
+    let bare = Shortcut(keyCode: ShortcutKey.rightCommand, modifierFlags: 0)
+    let flagged = Shortcut(
+        keyCode: ShortcutKey.rightCommand,
+        modifierFlags: ShortcutModifier.command
+    )
+    require(
+        bare.matches(keyCode: ShortcutKey.rightCommand)
+            && flagged.matches(keyCode: ShortcutKey.rightCommand),
+        "one modifier press must be recognised however it was reported"
+    )
+}
+func testShortcutBareModifierStillProducesTwoDistinctEvents() {
+    // The trigger this work exists for is a bare right Command. Recorded bare
+    // it carries no flag, so a naive press/release pair would be byte for byte
+    // identical and the target would see the key pressed twice and never
+    // released. The press must therefore report the modifier's own flag.
+    let bare = Shortcut(keyCode: ShortcutKey.rightCommand, modifierFlags: 0)
+    let sequence = bare.tapSequence()
+
+    require(
+        sequence[0].modifierFlags == ShortcutModifier.command,
+        "a modifier press must report its own flag"
+    )
+    require(
+        sequence[0] != sequence[1],
+        "press and release of a bare modifier must still be distinguishable"
+    )
+    require(
+        sequence[1].modifierFlags == 0,
+        "the release must clear the modifier"
+    )
+}
+
+func testShortcutMainKeyPressIsUnchangedByTheModifierRule() {
+    // The rule above applies only to modifier keys. A combination's press must
+    // carry exactly the modifiers that were recorded.
+    let controlShiftV = Shortcut(
+        keyCode: ShortcutKey.v,
+        modifierFlags: ShortcutModifier.control | ShortcutModifier.shift
+    )
+    require(
+        controlShiftV.downEvent().modifierFlags
+            == ShortcutModifier.control | ShortcutModifier.shift,
+        "a combination's press must carry exactly the recorded modifiers"
+    )
+}
+
 // MARK: - Shortcut self-test entry
 
 func runShortcutSelfTests() {
@@ -287,6 +390,11 @@ func runShortcutSelfTests() {
     testShortcutDistinguishesWhetherAModifierWasAlsoHeld()
     testShortcutMigrationDistinguishesThreeCases()
     testShortcutMigrationFallsBackOnUnrecognisedLegacyValue()
+    testShortcutTapSequenceIsPressThenRelease()
+    testShortcutMatchesItsOwnKeyAndNotOthers()
+    testShortcutMatchesBareAndFlaggedFormOfOneModifier()
+    testShortcutBareModifierStillProducesTwoDistinctEvents()
+    testShortcutMainKeyPressIsUnchangedByTheModifierRule()
 
     print("PASS: left/right variants stay distinct")
     print("PASS: combinations with a main key are representable")
@@ -298,6 +406,11 @@ func runShortcutSelfTests() {
     print("PASS: bare and flagged modifier presses stay distinguishable")
     print("PASS: migration separates stored / legacy-implicit / fresh install")
     print("PASS: unrecognised legacy values fall back safely")
+    print("PASS: a toggle is a press followed by a release")
+    print("PASS: a shortcut matches its own key only")
+    print("PASS: one modifier press is recognised however reported")
+    print("PASS: a bare modifier still produces a press and a release")
+    print("PASS: a combination press carries exactly its modifiers")
 }
 
 runShortcutSelfTests()

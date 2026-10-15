@@ -6,6 +6,9 @@ enum AppStorage {
     static let macInputEnabledKey = "macInputEnabled"
     static let remoteInputEnabledKey = "remoteInputEnabled"
     static let inputTriggerKeyKey = "inputTriggerKey"
+    static let shortcutKey = "voiceShortcut"
+    static let shortcutKeyCodeField = "keyCode"
+    static let shortcutModifiersField = "modifierFlags"
 
     static let logsDirectory: URL = {
         FileManager.default.homeDirectoryForCurrentUser
@@ -33,7 +36,6 @@ enum AppStorage {
             recordingEnabledKey: false,
             macInputEnabledKey: true,
             remoteInputEnabledKey: true,
-            inputTriggerKeyKey: InputTriggerKey.option.rawValue,
         ])
         ensureDirectory(logsDirectory)
         ensureDirectory(applicationSupportDirectory)
@@ -62,14 +64,75 @@ enum AppStorage {
         set { UserDefaults.standard.set(newValue, forKey: remoteInputEnabledKey) }
     }
 
-    static var inputTriggerKey: InputTriggerKey {
-        get {
-            let raw = UserDefaults.standard.string(forKey: inputTriggerKeyKey)
-            return InputTriggerKey(rawValue: raw ?? "") ?? .option
+    static var shortcut: Shortcut? {
+        get { migratedShortcut }
+        set { setShortcut(newValue) }
+    }
+
+    /// Replaces the old fixed trigger picker.
+    ///
+    /// The value read back through `UserDefaults.standard` cannot answer
+    /// whether a user ever chose a trigger, because `prepare()` registers a
+    /// default for the legacy key: every install, old or new, reports the same
+    /// value. So the decision reads the **persisted** domain instead, which
+    /// contains only what was actually written, and runs once.
+    private static let migratedShortcut: Shortcut? = {
+        if let stored = readShortcut() { return stored }
+
+        let domain = persistedDomain
+        let decision = ShortcutMigration.decide(
+            persistedTriggerKey: domain[inputTriggerKeyKey] as? String,
+            hasOtherPersistedSettings: !domain.isEmpty
+        )
+        UserDefaults.standard.removeObject(forKey: inputTriggerKeyKey)
+
+        switch decision {
+        case .stored(let shortcut), .legacyImplicit(let shortcut):
+            setShortcut(shortcut)
+            return shortcut
+        case .freshInstall:
+            return nil
         }
-        set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: inputTriggerKeyKey)
+    }()
+
+    private static func readShortcut() -> Shortcut? {
+        guard let stored = UserDefaults.standard.dictionary(
+            forKey: shortcutKey
+        ) else { return nil }
+        guard let keyCode = stored[shortcutKeyCodeField] as? NSNumber,
+              let modifierFlags = stored[shortcutModifiersField] as? NSNumber
+        else { return nil }
+        return Shortcut(
+            keyCode: UInt16(truncating: keyCode),
+            modifierFlags: modifierFlags.uint64Value
+        )
+    }
+
+    private static func setShortcut(_ shortcut: Shortcut?) {
+        guard let shortcut else {
+            UserDefaults.standard.removeObject(forKey: shortcutKey)
+            return
         }
+        UserDefaults.standard.set(
+            [
+                shortcutKeyCodeField: NSNumber(value: shortcut.keyCode),
+                shortcutModifiersField: NSNumber(
+                    value: shortcut.modifierFlags
+                ),
+            ],
+            forKey: shortcutKey
+        )
+    }
+
+    /// What was actually written to disk, as opposed to what
+    /// `UserDefaults.standard` reports after registered defaults are applied.
+    ///
+    /// A bare debug executable has no bundle identifier and therefore no
+    /// persisted domain; verification against a packaged build is the only way
+    /// to observe a realistic value here.
+    private static var persistedDomain: [String: Any] {
+        guard let identifier = Bundle.main.bundleIdentifier else { return [:] }
+        return UserDefaults.standard.persistentDomain(forName: identifier) ?? [:]
     }
 
     static func ensureDirectory(_ url: URL) {

@@ -95,7 +95,10 @@ final class X6SessionCoordinator {
         setRemoteRouteActive: @escaping (Bool) -> Void = {
             AudioPipe.shared.setRemoteActive($0)
         },
-        triggerTap: @escaping () -> Void = { Key.triggerTap() },
+        triggerTap: @escaping () -> Void = {
+            guard let shortcut = AppStorage.shortcut else { return }
+            Key.triggerTap(shortcut)
+        },
         now: @escaping () -> Date = Date.init
     ) {
         self.doubaoState = doubaoState

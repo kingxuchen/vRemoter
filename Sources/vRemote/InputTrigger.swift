@@ -1,47 +1,25 @@
 import CoreGraphics
 import Foundation
 
-enum InputTriggerKey: String, CaseIterable, Identifiable {
-    case option
-    case command
-    case control
-    case shift
-    case function
+/// Sends a shortcut's events to the system as real keyboard input.
+///
+/// The events are marked so the app's own event tap can tell them apart from a
+/// physical press and from other remappers; without that marker a synthesized
+/// trigger would be observed as a second physical press and drive the microphone
+/// transition twice.
+final class SystemShortcutEventPoster: ShortcutEventPosting {
+    static let shared = SystemShortcutEventPoster()
 
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .option: "Option (⌥)"
-        case .command: "Command (⌘)"
-        case .control: "Control (⌃)"
-        case .shift: "Shift (⇧)"
-        case .function: "Fn / Globe"
-        }
-    }
-
-    var keyCodes: Set<Int64> {
-        switch self {
-        case .option: [0x3A, 0x3D]
-        case .command: [0x37, 0x36]
-        case .control: [0x3B, 0x3E]
-        case .shift: [0x38, 0x3C]
-        case .function: [0x3F]
-        }
-    }
-
-    var primaryKeyCode: CGKeyCode {
-        CGKeyCode(keyCodes.min() ?? 0x3A)
-    }
-
-    var flag: CGEventFlags {
-        switch self {
-        case .option: .maskAlternate
-        case .command: .maskCommand
-        case .control: .maskControl
-        case .shift: .maskShift
-        case .function: .maskSecondaryFn
-        }
+    func post(_ event: ShortcutKeyEvent, marker: Int64) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        guard let cgEvent = CGEvent(
+            keyboardEventSource: source,
+            virtualKey: CGKeyCode(event.keyCode),
+            keyDown: true
+        ) else { return }
+        cgEvent.flags = CGEventFlags(rawValue: event.modifierFlags)
+        cgEvent.setIntegerValueField(.eventSourceUserData, value: marker)
+        cgEvent.post(tap: .cghidEventTap)
     }
 }
 
@@ -50,39 +28,24 @@ enum Key {
     /// keyboards, Bluetooth buttons, and external remappers.
     static let syntheticMarker: Int64 = 0x4D_49_52_42 // "MIRB"
 
-    static func triggerDown(_ trigger: InputTriggerKey = AppStorage.inputTriggerKey) {
-        post(trigger: trigger, keyDown: true)
-    }
-
-    static func triggerUp(_ trigger: InputTriggerKey = AppStorage.inputTriggerKey) {
-        post(trigger: trigger, keyDown: false)
-    }
-
-    /// A deliberate short modifier click for Doubao's toggle mode.
+    /// A deliberate short click of the user's trigger.
+    ///
+    /// The press and release are separate posts with a gap between them, because
+    /// a target app distinguishing a toggle from a hold needs to see both edges.
     static func triggerTap(
-        _ trigger: InputTriggerKey = AppStorage.inputTriggerKey,
+        _ shortcut: Shortcut,
+        using poster: ShortcutEventPosting = SystemShortcutEventPoster.shared,
+        gap: TimeInterval = 0.06,
         completion: (() -> Void)? = nil
     ) {
-        triggerDown(trigger)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-            triggerUp(trigger)
+        let sequence = shortcut.tapSequence()
+        guard let press = sequence.first else { return }
+        poster.post(press, marker: syntheticMarker)
+        DispatchQueue.main.asyncAfter(deadline: .now() + gap) {
+            for release in sequence.dropFirst() {
+                poster.post(release, marker: syntheticMarker)
+            }
             completion?()
         }
-    }
-
-    private static func post(trigger: InputTriggerKey, keyDown: Bool) {
-        let source = CGEventSource(stateID: .hidSystemState)
-        guard let event = CGEvent(
-            keyboardEventSource: source,
-            virtualKey: trigger.primaryKeyCode,
-            keyDown: keyDown
-        ) else { return }
-        event.flags = keyDown ? trigger.flag : []
-        event.setIntegerValueField(.eventSourceUserData, value: syntheticMarker)
-        event.post(tap: .cghidEventTap)
-        print(
-            "[KEY] synthetic \(trigger.title) " +
-            (keyDown ? "DOWN" : "UP")
-        )
     }
 }

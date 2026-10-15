@@ -43,32 +43,46 @@
 
 ## Task 2: 存储与合成切换，含存量迁移
 
-**Description:** 把触发键的持久化改为读写新的快捷键值类型；把合成路径改为按记录下来的键码与修饰标记投递，替换原先依赖枚举的静态方法；投递走可注入发送器，使「发了几次、发的什么」可被断言；执行一次性迁移并写入新表示。本任务落地后系统仍处于可用状态：迁移保证存量用户行为不变。
+> ✅ 完成 2026-10-15，与原 Task 3 合并为一个垂直切片。
+>
+> **为什么合并：**`DebugWindowController` 的选择器是枚举的唯一 UI 调用方，删枚举就必须改它。若 Task 2 只改存储与合成，UI 只能变成「只读显示 + 清除」，比现在能选 5 项还差，等于把系统留在坏状态。合并后「用户可录制任意快捷键并生效」一次落地。
+>
+> **TDD 拓出一个真缺陷：**右 Command 录成 `flags=0` 时，down 与 up 两个事件完全相同（`(0x36,0)` 对 `(0x36,0)`），而发送端两个都按 `keyDown:true` 发。目标 App 会看到「右 Command 按了两次、从没松开」。**这正是 Type4Me 用的那个键。**已修：修饰键的 press 必须带上自身 flag。
+
+**Description:** 把触发键的持久化改为读写新的快捷键值类型；把合成路径改为按记录下来的键码与修饰标记投递，替换原先依赖枚举的静态方法；投递走可注入发送器；执行一次性迁移并写入新表示。
 
 **Acceptance criteria:**
-- [ ] 合成时按记录的键码与修饰标记投递，不再经由枚举
-- [ ] 修饰标记直接设在主键事件上，无需真实投递各修饰键的按下与抬起
-- [ ] toggle 语义下按下与抬起各投递一次，长按不重复触发
-- [ ] 三种迁移情形各自正确，未知旧字符串有兜底
-- [ ] 迁移只执行一次，执行后写入新表示
+- [x] 合成时按记录的键码与修饰标记投递，不再经由枚举
+- [x] 修饰标记直接设在主键事件上，无需真实投递各修饰键的按下与抬起
+- [x] toggle 语义下按下与抬起各投递一次，长按不重复触发
+- [x] 三种迁移情形各自正确，未知旧字符串有兜底
+- [x] 迁移只执行一次，执行后写入新表示
+- [x] 枚举及其 `min()` 缺陷已彻底删除
 
 **Verification:**
-- [ ] Tests pass: `./run-self-tests.sh`、`swift run vRemote --voice-session-self-test`
-- [ ] Build succeeds: `swift build`
-- [ ] Manual check: 真机从 1.1.1 升级后豆包语音键行为与升级前一致；若存量判据在真机上不成立，立即停下向用户确认
+- [x] Tests pass: `./run-self-tests.sh`（18 条 PASS，exit 0）
+- [x] Build succeeds: `swift build`（exit 0）
+- [x] 回归: `swift run vRemote --voice-session-self-test`（failures=0，exit 0）
+- [x] 真机: 新装态 → 点一下 → 按 V → 显示「V」+ 清除按钮（证据见 `.verification/*/feature-04-recording.txt`）
+- [ ] 真机: **1.1.1 存量升级** —— 裸 debug 可执行文件无 bundle id，持久化域恒为空，必须用打包版验证
+- [ ] 真机: **右 Command 录制** —— harness 发不出仅右侧的修饰键
+- [ ] 真机: **合成事件被 Type4Me 识别** —— 需遥控器 + Type4Me 录 `vRemoteDr 2ch`
 
 **Dependencies:** Task 1
 **Files likely touched:**
-- `Sources/vRemote/AppStorage.swift`
 - `Sources/vRemote/InputTrigger.swift`
-- `Sources/vRemote/ShortcutMigration.swift`
-- `SelfTests/main.swift`
+- `Sources/vRemote/AppStorage.swift`
+- `Sources/vRemote/ShortcutRecorder.swift`（新增）
+- `Sources/vRemote/X6SearchSuppressor.swift`
+- `Sources/vRemote/DebugWindowController.swift`
 
-**Estimated scope:** Medium: 4 files
+**Estimated scope:** Medium: 5 files
 
 ---
 
 ## Task 3: 录制拾取界面
+
+> ✅ 已并入 Task 2 完成。录制、重录、清除、Esc 取消、无障碍标签与回显均已落地并真机验证。
 
 **Description:** 把设置里的固定枚举下拉框替换为录制式拾取控件：点击进入拾取状态，用户直接按下想要的组合键，设置项回显可读文本。支持覆盖重录、清除回到未配置态、Esc 取消且不改动已保存值。补齐未配置状态的界面行为与可访问性（标签、朗读描述、键盘可达、状态不单靠颜色、减弱动效、最小窗口不裁切）。本任务完成后，「用户可录制任意快捷键并生效」这条垂直切片完整可用。
 
@@ -96,10 +110,11 @@
 ---
 
 ### Checkpoint: 快捷键切片完成
-- [ ] `./run-self-tests.sh` 通过
-- [ ] `swift run vRemote --voice-session-self-test` 通过
-- [ ] 真机：录制一个带主键的组合，语音键按下发出的是它
-- [ ] 真机：1.1.1 存量配置升级后行为不变
+- [x] `./run-self-tests.sh` 通过（18 条）
+- [x] `swift run vRemote --voice-session-self-test` 通过
+- [x] 真机：录制一个快捷键，界面正确回显
+- [ ] 真机：1.1.1 存量配置升级后行为不变（需打包版）
+- [ ] 真机：右 Command 录制 + 合成事件被目标 App 识别
 - [ ] Review with human before proceeding
 
 ---

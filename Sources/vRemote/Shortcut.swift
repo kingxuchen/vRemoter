@@ -1,4 +1,5 @@
 import Foundation
+
 /// One key plus the modifiers held with it.
 ///
 /// Deliberately Foundation-only: this type is exercised by the framework-free
@@ -25,8 +26,17 @@ struct Shortcut: Equatable {
     ///
     /// Modifiers travel on the main key event rather than as their own
     /// press/release pairs; that is how the target app recognises a chord.
+    ///
+    /// A modifier key always reports its own flag on the press, even when it was
+    /// recorded bare. Without that the press and the release would be byte for
+    /// byte identical, the target would see the key pressed twice and never
+    /// released, and a bare right-hand modifier would not work at all.
     func downEvent() -> ShortcutKeyEvent {
-        ShortcutKeyEvent(keyCode: keyCode, modifierFlags: modifierFlags)
+        var flags = modifierFlags
+        if let own = Self.sideModifierFlags[keyCode] {
+            flags |= own
+        }
+        return ShortcutKeyEvent(keyCode: keyCode, modifierFlags: flags)
     }
 
     /// The event to post for the release half of a toggle.
@@ -41,6 +51,27 @@ struct Shortcut: Equatable {
     ///   shipping combinations with a main key. See the plan's risk table.
     func upEvent() -> ShortcutKeyEvent {
         ShortcutKeyEvent(keyCode: keyCode, modifierFlags: 0)
+    }
+
+    /// The whole event sequence one toggle consists of.
+    ///
+    /// Expressed as data so the toggle's shape can be asserted without timing.
+    func tapSequence() -> [ShortcutKeyEvent] {
+        [downEvent(), upEvent()]
+    }
+
+    /// Whether an observed key event is this shortcut being pressed.
+    ///
+    /// A bare modifier may be reported either with or without its own flag set,
+    /// depending on the source, so both forms count as the same press. This is
+    /// how the app stops watching two variants of one concept at once.
+    func matches(keyCode observedKeyCode: UInt16) -> Bool {
+        guard observedKeyCode == keyCode else { return false }
+        if Self.sideNames[keyCode] != nil {
+            let held = Self.sideModifierFlags[keyCode] ?? 0
+            return modifierFlags == 0 || modifierFlags == held
+        }
+        return true
     }
 
     /// A readable rendering, in the modifier order macOS itself uses.
@@ -78,6 +109,17 @@ struct Shortcut: Equatable {
         ShortcutKey.rightOption: "右 Option",
         ShortcutKey.leftCommand: "左 Command",
         ShortcutKey.rightCommand: "右 Command",
+    ]
+
+    private static let sideModifierFlags: [UInt16: UInt64] = [
+        ShortcutKey.leftShift: ShortcutModifier.shift,
+        ShortcutKey.rightShift: ShortcutModifier.shift,
+        ShortcutKey.leftControl: ShortcutModifier.control,
+        ShortcutKey.rightControl: ShortcutModifier.control,
+        ShortcutKey.leftOption: ShortcutModifier.option,
+        ShortcutKey.rightOption: ShortcutModifier.option,
+        ShortcutKey.leftCommand: ShortcutModifier.command,
+        ShortcutKey.rightCommand: ShortcutModifier.command,
     ]
 
     /// `kVK_ANSI_*` follows the US keyboard layout, not the alphabet: `V` is
@@ -119,4 +161,12 @@ struct Shortcut: Equatable {
 struct ShortcutKeyEvent: Equatable {
     let keyCode: UInt16
     let modifierFlags: UInt64
+}
+
+/// Receives the events a shortcut emits.
+///
+/// Foundation-only so the toggle's shape can be asserted in the framework-free
+/// self-test; the implementation that talks to CoreGraphics lives elsewhere.
+protocol ShortcutEventPosting: AnyObject {
+    func post(_ event: ShortcutKeyEvent, marker: Int64)
 }

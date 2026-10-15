@@ -12,7 +12,15 @@ enum ShortcutKey {
     static let leftControl: UInt16 = 0x3B
     static let rightControl: UInt16 = 0x3E
     static let space: UInt16 = 0x31
+    static let escape: UInt16 = 0x35
     static let v: UInt16 = 0x09
+
+    /// The left/right modifier keys, which macOS reports through flag changes
+    /// rather than ordinary key presses.
+    static let sideKeyCodes: Set<UInt16> = [
+        leftShift, rightShift, leftControl, rightControl,
+        leftOption, rightOption, leftCommand, rightCommand,
+    ]
 
     /// F15. On Apple keyboards this pair is display brightness, which macOS
     /// keeps for itself.

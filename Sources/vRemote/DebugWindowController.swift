@@ -254,13 +254,16 @@ private final class ConsoleViewModel: ObservableObject {
     @Published var bluetoothGranted = false
     @Published var x6Connected = false
     @Published var chromecastConnected = false
-    @Published var inputTriggerKey = AppStorage.inputTriggerKey
+    @Published var shortcut = AppStorage.shortcut
+    @Published var isRecordingShortcut = false
+    @Published var shortcutRecordingRejected: String?
     @Published var activeModal: ConsoleModal?
     @Published var showX6MicHint = !UserDefaults.standard.bool(
         forKey: "vRemoter.hasCompletedX6MicTest"
     )
 
     private var donationPromptShownInSession = false
+    private let shortcutRecorder = ShortcutRecorder()
 
     var onStopMicrophone: (() -> Void)?
     var onRestartApp: (() -> Void)?
@@ -273,10 +276,39 @@ private final class ConsoleViewModel: ObservableObject {
     var macSolo: Bool { macInputEnabled && !remoteInputEnabled }
     var remoteSolo: Bool { remoteInputEnabled && !macInputEnabled }
 
-    func setInputTrigger(_ trigger: InputTriggerKey) {
-        guard inputTriggerKey != trigger else { return }
-        inputTriggerKey = trigger
-        AppStorage.inputTriggerKey = trigger
+    func beginRecordingShortcut() {
+        guard !isRecordingShortcut else { return }
+        shortcutRecordingRejected = nil
+        isRecordingShortcut = true
+        shortcutRecorder.start(
+            onCapture: { [weak self] recorded in
+                self?.finishRecordingShortcut(with: recorded)
+            },
+            onReject: { [weak self] reason in
+                self?.shortcutRecordingRejected = reason
+            }
+        )
+    }
+
+    func cancelRecordingShortcut() {
+        shortcutRecorder.cancel()
+        isRecordingShortcut = false
+    }
+
+    func clearShortcut() {
+        guard shortcut != nil else { return }
+        applyShortcut(nil)
+    }
+
+    private func finishRecordingShortcut(with recorded: Shortcut) {
+        applyShortcut(recorded)
+    }
+
+    private func applyShortcut(_ recorded: Shortcut?) {
+        shortcut = recorded
+        AppStorage.shortcut = recorded
+        isRecordingShortcut = false
+        shortcutRecordingRejected = nil
         onInputTriggerChanged?()
     }
 
@@ -870,13 +902,13 @@ private struct KeyMappingView: View {
                 HStack(spacing: 7) {
                     Image(systemName: "waveform.badge.mic")
                         .foregroundStyle(ConsoleTheme.green)
-                    Text(L10n.text("豆包语音触发键", "Doubao voice trigger"))
+                    Text(L10n.text("语音触发键", "Voice trigger key"))
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(ConsoleTheme.text)
                 }
                 Text(L10n.text(
-                    "遥控器语音键与电脑键盘都使用这个按键控制豆包。这里必须与豆包输入法中的语音快捷键保持一致。",
-                    "The remote voice key and Mac keyboard both use this trigger. It must match Doubao Input Method's voice shortcut."
+                    "遥控器语音键按下时会发送这个快捷键。请把它设成你要用的语音输入法的录音快捷键。",
+                    "The remote voice key sends this shortcut when pressed. Set it to the recording shortcut of the voice input app you use."
                 ))
                     .font(.system(size: 12.5))
                     .foregroundStyle(ConsoleTheme.secondary)
@@ -884,23 +916,10 @@ private struct KeyMappingView: View {
             }
             Spacer(minLength: 10)
             VStack(alignment: .trailing, spacing: 7) {
-                Picker(
-                    L10n.text("触发键", "Trigger"),
-                    selection: Binding(
-                        get: { model.inputTriggerKey },
-                        set: model.setInputTrigger
-                    )
-                ) {
-                    ForEach(InputTriggerKey.allCases) { trigger in
-                        Text(trigger.title).tag(trigger)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 158)
-                .disabled(model.remoteStreaming)
-                if model.inputTriggerKey == .function {
+                shortcutRecorderField
+                if let rejection = model.shortcutRecordingRejected {
                     Label(
-                        L10n.text("Fn 需在本机测试", "Test Fn on this Mac"),
+                        rejection,
                         systemImage: "exclamationmark.triangle.fill"
                     )
                     .font(.system(size: 10.5, weight: .medium))
@@ -909,11 +928,58 @@ private struct KeyMappingView: View {
                     Text(L10n.text("录音结束后可修改", "Stop recording to change"))
                         .font(.system(size: 10.5))
                         .foregroundStyle(ConsoleTheme.tertiary)
+                } else if model.shortcut == nil {
+                    Text(L10n.text("先设置你要触发的快捷键", "Set a shortcut first"))
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(ConsoleTheme.amber)
                 }
             }
         }
         .padding(.horizontal, 19)
         .background(panelBackground(ConsoleTheme.surface, radius: 17))
+    }
+
+    /// The recording control. A button rather than a text field, so a key
+    /// pressed while it is focused reaches the recorder instead of being typed
+    /// into the control.
+    private var shortcutRecorderField: some View {
+        HStack(spacing: 6) {
+            Button {
+                if model.isRecordingShortcut {
+                    model.cancelRecordingShortcut()
+                } else {
+                    model.beginRecordingShortcut()
+                }
+            } label: {
+                Text(
+                    model.isRecordingShortcut
+                        ? L10n.text("按下你要的快捷键…", "Press your shortcut…")
+                        : (model.shortcut?.displayText
+                            ?? L10n.text("点击设置", "Click to set"))
+                )
+                .font(.system(size: 13, weight: .medium))
+                .frame(width: 132)
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.remoteStreaming)
+            .accessibilityLabel(
+                model.isRecordingShortcut
+                    ? L10n.text("正在等待快捷键，按 Esc 取消", "Waiting for a shortcut, Esc to cancel")
+                    : L10n.text("设置语音触发快捷键", "Set the voice trigger shortcut")
+            )
+            .accessibilityValue(model.shortcut?.displayText ?? L10n.text("未设置", "Not set"))
+
+            if model.shortcut != nil, !model.isRecordingShortcut {
+                Button {
+                    model.clearShortcut()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel(L10n.text("清除快捷键", "Clear shortcut"))
+                .disabled(model.remoteStreaming)
+            }
+        }
     }
 
     private var devicePanel: some View {
