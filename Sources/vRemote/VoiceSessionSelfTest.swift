@@ -97,6 +97,8 @@ enum VoiceSessionSelfTest {
         testReleaseDoesNotClose(checks)
         testReleaseReRequestsThePersistentStream(checks)
         testCloseStopsReRequesting(checks)
+        testCloseSettlesBackToClosed(checks)
+        testRepeatedTogglesKeepWorking(checks)
         testDuplicateEdgesToggleOnce(checks)
         testRapidDoublePressRoundTrips(checks)
         testKeyboardOpenAndRemoteClose(checks)
@@ -231,6 +233,56 @@ enum VoiceSessionSelfTest {
         h.pressVoiceKey(.chromecast)
         c.expect(h.triggerTapCount == 2, "a press from the other remote still toggles")
         c.expect(h.coordinator.debugSnapshot.phase == "closing", "the session is not scoped to one remote")
+    }
+
+
+    private static func testCloseSettlesBackToClosed(_ c: CheckContext) {
+        // Regression. The close path used to end in a verification step that also
+        // returned the phase to .closed. Removing it left the session dangling in
+        // .closing, so every later press was discarded as "while closing": the
+        // third press did nothing and the user had to hold the button instead.
+        let h = Harness()
+        h.pressVoiceKey()
+        h.secondPress()
+        c.expect(h.coordinator.debugSnapshot.phase == "closing", "the second press begins closing")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+        c.expect(
+            h.coordinator.debugSnapshot.phase == "closed",
+            "closing must settle, or every later press is swallowed"
+        )
+    }
+
+    private static func testRepeatedTogglesKeepWorking(_ c: CheckContext) {
+        // The user asked for press/press/press/press to alternate open and
+        // closed indefinitely. Two cycles is enough to catch a session that
+        // latches after the first close.
+        let h = Harness()
+        for cycle in 1...2 {
+            // A person cannot press twice inside the debounce window, so let the
+            // fake clock reflect that rather than testing an unreachable timing.
+            h.advance(1.0)
+            h.pressVoiceKey(.chromecast)
+            c.expect(
+                h.coordinator.debugSnapshot.phase == "open",
+                "cycle \(cycle): a press opens"
+            )
+            c.expect(
+                h.triggerTapCount == cycle * 2 - 1,
+                "cycle \(cycle): a press emits exactly one more shortcut"
+            )
+
+            h.secondPress(.chromecast)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+            c.expect(
+                h.coordinator.debugSnapshot.phase == "closed",
+                "cycle \(cycle): the next press closes and settles"
+            )
+            c.expect(
+                h.triggerTapCount == cycle * 2,
+                "cycle \(cycle): closing emits the shortcut again"
+            )
+        }
+        c.expect(h.openRequests.count == 2, "each open asks for the microphone once")
     }
 
     private static func testDebouncedRetry(_ c: CheckContext) {

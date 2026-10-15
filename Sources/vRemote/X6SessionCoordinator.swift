@@ -544,6 +544,14 @@ final class X6SessionCoordinator {
             guard let self, self.generation == expectedGeneration else { return }
             self.routeCloseWorkItem = nil
             self.closeRouteAndTransports()
+            // Closing the audio route is the end of the session. Without this
+            // the phase stayed at .closing forever and every later press was
+            // discarded as "while closing", so the third press did nothing and
+            // the only way left to get audio was to hold the button — which is
+            // the hold-to-talk behaviour this work set out to remove.
+            if self.phase == .closing {
+                self.finalizeClosed(reason: "route closed")
+            }
         }
         routeCloseWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
