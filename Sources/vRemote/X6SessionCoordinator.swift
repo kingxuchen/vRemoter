@@ -72,10 +72,13 @@ final class X6SessionCoordinator {
 
     private static let pressEdgeDebounce: TimeInterval = 0.25
     private static let openConfirmationTimeout: TimeInterval = 1.0
+    /// How long a close waits before giving up on the device becoming free.
+    private static let closeGrace: TimeInterval = 2.0
 
     private let setRemoteRouteActive: (Bool) -> Void
     private let triggerTap: () -> Void
     private let triggerAvailable: () -> Bool
+    private let deviceStillHeld: () -> Bool
     private let now: () -> Date
 
     private var phase: Phase = .closed
@@ -86,6 +89,9 @@ final class X6SessionCoordinator {
     private var streamingRemotes = Set<VoiceRemoteID>()
     private var openRequestedRemote: VoiceRemoteID?
     private var lastPressEdgeAt: Date?
+    /// When the current close began, so the grace period does not restart on
+    /// every retry and therefore never expires.
+    private var closeStartedAt: Date?
 
     private var routeCloseWorkItem: DispatchWorkItem?
     private var startVerificationWorkItem: DispatchWorkItem?
@@ -108,11 +114,15 @@ final class X6SessionCoordinator {
             Key.triggerTap(shortcut)
         },
         triggerAvailable: @escaping () -> Bool = { AppStorage.shortcut != nil },
+        deviceStillHeld: @escaping () -> Bool = {
+            VoiceDeviceConsumer.probe().isHeld
+        },
         now: @escaping () -> Date = Date.init
     ) {
         self.setRemoteRouteActive = setRemoteRouteActive
         self.triggerTap = triggerTap
         self.triggerAvailable = triggerAvailable
+        self.deviceStillHeld = deviceStillHeld
         self.now = now
     }
 
@@ -395,6 +405,7 @@ final class X6SessionCoordinator {
         phase = .closing
         owner = .none
         openRequestedRemote = nil
+        closeStartedAt = now()
         if sendTrigger {
             triggerTap()
         }
@@ -412,6 +423,7 @@ final class X6SessionCoordinator {
         phase = .closed
         owner = .none
         sessionRemote = nil
+        closeStartedAt = nil
         closeRouteAndTransports()
         print("[VOICE-SESSION] closed reason=\(reason)")
     }
@@ -563,21 +575,31 @@ final class X6SessionCoordinator {
         )
     }
 
+    private var closeElapsed: TimeInterval {
+        guard let closeStartedAt else { return 0 }
+        return now().timeIntervalSince(closeStartedAt)
+    }
+
     private func scheduleRouteClose(after delay: TimeInterval) {
         routeCloseWorkItem?.cancel()
         let expectedGeneration = generation
+
+        // A second press that the target app swallows leaves it still recording
+        // from this device. Cutting the remote microphone at that point leaves
+        // the user talking into a closed microphone, which is the one failure
+        // worth waiting a moment to avoid. Bounded, so a device that is simply
+        // being held open by something unrelated cannot hold the session open.
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.generation == expectedGeneration else { return }
-            self.routeCloseWorkItem = nil
-            self.closeRouteAndTransports()
-            // Closing the audio route is the end of the session. Without this
-            // the phase stayed at .closing forever and every later press was
-            // discarded as "while closing", so the third press did nothing and
-            // the only way left to get audio was to hold the button — which is
-            // the hold-to-talk behaviour this work set out to remove.
-            if self.phase == .closing {
-                self.finalizeClosed(reason: "route closed")
+            guard self.phase == .closing else { return }
+            if self.deviceStillHeld(),
+               self.closeElapsed < Self.closeGrace
+            {
+                self.publish("语音应用仍在收音 · 稍后再关")
+                self.scheduleRouteClose(after: 0.2)
+                return
             }
+            self.finishClosing()
         }
         routeCloseWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
@@ -591,6 +613,17 @@ final class X6SessionCoordinator {
         openRetryWorkItem = nil
         openConfirmationWorkItem?.cancel()
         openConfirmationWorkItem = nil
+    }
+
+    private func finishClosing() {
+        closeRouteAndTransports()
+        // Closing the audio route is the end of the session. Without this the
+        // phase stayed at .closing forever and every later press was discarded
+        // as "while closing", so the third press did nothing and the only way
+        // left to get audio was to hold the button.
+        if phase == .closing {
+            finalizeClosed(reason: "route closed")
+        }
     }
 
     private func closeRouteAndTransports() {

@@ -446,6 +446,76 @@ func testShortcutSurvivesBeingRewritten() {
     AppStorage.shortcut = nil
 }
 
+// MARK: - Device consumer probe
+
+func testConsumerProbeFindsTheProcessHoldingTheDevice() {
+    let picture: [(pid: pid_t, deviceNames: [String])] = [
+        (100, ["MacBook Pro Microphone"]),
+        (200, ["vRemoteDr 2ch"]),
+        (300, ["vRemoteDr 2ch", "MacBook Pro Microphone"]),
+    ]
+    let found = VoiceDeviceConsumer.holders(
+        among: picture,
+        targetDeviceName: "vRemoteDr 2ch",
+        excludedPids: []
+    )
+    require(found.count == 2, "both processes holding the device are reported")
+    require(
+        found.map(\.pid) == [200, 300],
+        "only the processes actually holding it are reported"
+    )
+}
+
+func testConsumerProbeExcludesThisApp() {
+    // vRemoter holds the device itself through its IOProc, so counting itself
+    // would make every answer "held" and the guard would never let go.
+    let picture: [(pid: pid_t, deviceNames: [String])] = [
+        (42, ["vRemoteDr 2ch"]),
+        (200, ["vRemoteDr 2ch"]),
+    ]
+    let found = VoiceDeviceConsumer.holders(
+        among: picture,
+        targetDeviceName: "vRemoteDr 2ch",
+        excludedPids: [42]
+    )
+    require(
+        found.map(\.pid) == [200],
+        "this app must never be counted as a consumer"
+    )
+}
+
+func testConsumerProbeIgnoresSimilarNames() {
+    let picture: [(pid: pid_t, deviceNames: [String])] = [
+        (200, ["vRemoteDr 4ch"]),
+        (201, ["vRemoteDr 2ch Pro"]),
+        (202, ["vremoteDR 2ch"]),
+    ]
+    let found = VoiceDeviceConsumer.holders(
+        among: picture,
+        targetDeviceName: "vRemoteDr 2ch",
+        excludedPids: []
+    )
+    require(
+        found.map(\.pid) == [202],
+        "the device name is matched case-insensitively and only as a whole name"
+    )
+}
+
+func testConsumerAnswerReportsHeldAndUnknown() {
+    require(
+        VoiceDeviceConsumer.Answer.held(by: []).isHeld,
+        "a held answer must read as held even with an empty list"
+    )
+    require(
+        !VoiceDeviceConsumer.Answer.none.isHeld,
+        "an empty picture must not read as held"
+    )
+    require(
+        !VoiceDeviceConsumer.Answer.unknown.isHeld,
+        "an unreadable picture must never be treated as held"
+    )
+}
+
 // MARK: - Shortcut self-test entry
 
 func runShortcutSelfTests() {
@@ -467,6 +537,10 @@ func runShortcutSelfTests() {
     testShortcutReadsBackAFnMigratedFromTheOldPicker()
     testShortcutRecordedAfterTheAppHasReadIsNotIgnored()
     testShortcutSurvivesBeingRewritten()
+    testConsumerProbeFindsTheProcessHoldingTheDevice()
+    testConsumerProbeExcludesThisApp()
+    testConsumerProbeIgnoresSimilarNames()
+    testConsumerAnswerReportsHeldAndUnknown()
 
     print("PASS: left/right variants stay distinct")
     print("PASS: combinations with a main key are representable")
@@ -486,6 +560,10 @@ func runShortcutSelfTests() {
     print("PASS: a migrated Fn trigger reads back by name")
     print("PASS: a shortcut recorded after the first read is served back")
     print("PASS: the most recently recorded shortcut wins")
+    print("PASS: the probe finds who holds the device")
+    print("PASS: the probe excludes this app")
+    print("PASS: the probe matches only the whole name")
+    print("PASS: an unreadable picture is never held")
 }
 
 runShortcutSelfTests()

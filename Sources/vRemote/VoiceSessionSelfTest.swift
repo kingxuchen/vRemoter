@@ -12,8 +12,16 @@ enum VoiceSessionSelfTest {
         var closeRequestCount = 0
         var openResults = [RemoteMicrophoneOpenResult]()
         var preferredRemote: VoiceRemoteID? = .chromecast
+        var closeCalls = 0
+
+        /// Indirection so a closure can be handed to the coordinator before the
+        /// instance it belongs to has finished initialising.
+        private final class Flag {
+            var value = false
+        }
 
         init(shortcutConfigured: Bool = true) {
+            let heldFlag = Flag()
             var routeSink: ((Bool) -> Void)?
             var triggerSink: (() -> Void)?
             var nowSink: (() -> Date)?
@@ -21,6 +29,7 @@ enum VoiceSessionSelfTest {
                 setRemoteRouteActive: { routeSink?($0) },
                 triggerTap: { triggerSink?() },
                 triggerAvailable: { shortcutConfigured },
+                deviceStillHeld: { heldFlag.value },
                 now: { nowSink?() ?? Date(timeIntervalSince1970: 0) }
             )
             routeSink = { [weak self] active in
@@ -45,12 +54,37 @@ enum VoiceSessionSelfTest {
             }
             coordinator.onMicrophoneCloseRequested = { [weak self] in
                 self?.closeRequestCount += 1
+                self?.closeCalls += 1
             }
             coordinator.start()
+            deviceHeldFlag = heldFlag
+        }
+
+        private var deviceHeldFlag: Flag!
+
+        var deviceHeld: Bool {
+            get { deviceHeldFlag.value }
+            set { deviceHeldFlag.value = newValue }
         }
 
         func advance(_ seconds: TimeInterval) {
             clock = clock.addingTimeInterval(seconds)
+        }
+
+        /// Lets real time pass while the fake clock moves with it.
+        ///
+        /// The coordinator's retry delays run on the main queue, which is real
+        /// time, while its grace period is measured with the injected clock. In
+        /// the app both are the same clock; without this the two diverge and a
+        /// grace period measured in fake time never expires.
+        func run(seconds: TimeInterval, slice: TimeInterval = 0.1) {
+            var remaining = seconds
+            while remaining > 0 {
+                let step = min(slice, remaining)
+                RunLoop.current.run(until: Date().addingTimeInterval(step))
+                clock = clock.addingTimeInterval(step)
+                remaining -= step
+            }
         }
 
         /// One physical press of the voice key, as the remote announces it.
@@ -101,6 +135,9 @@ enum VoiceSessionSelfTest {
         testRepeatedTogglesKeepWorking(checks)
         testTransportAcknowledgementIsNotAPress(checks)
         testBothRemotesStillPressOnceEach(checks)
+        testCloseDefersWhileTheDeviceIsStillHeld(checks)
+        testCloseIsNotHeldForeverByAStuckDevice(checks)
+        testCloseDoesNotWaitWhenNothingHoldsIt(checks)
         testDuplicateEdgesToggleOnce(checks)
         testRapidDoublePressRoundTrips(checks)
         testKeyboardOpenAndRemoteClose(checks)
@@ -330,6 +367,62 @@ enum VoiceSessionSelfTest {
         c.expect(
             x6.coordinator.debugSnapshot.phase == "open",
             "X6 treats 0x03 as an acknowledgement, not a second press"
+        )
+    }
+
+
+    private static func testCloseDefersWhileTheDeviceIsStillHeld(_ c: CheckContext) {
+        // A second press the target app swallows leaves it still recording from
+        // this device. Cutting the microphone then leaves the user talking into a
+        // closed one.
+        let h = Harness()
+        h.pressVoiceKey()
+        h.deviceHeld = true
+        h.secondPress()
+        h.run(seconds: 0.15)
+        c.expect(
+            !h.routeChanges.contains(false),
+            "a held device is not cut straight away"
+        )
+
+        h.deviceHeld = false
+        h.run(seconds: 0.5)
+        c.expect(
+            h.routeChanges.contains(false),
+            "once the device is free the route closes"
+        )
+        c.expect(
+            h.coordinator.debugSnapshot.phase == "closed",
+            "the session still ends after the device frees up"
+        )
+    }
+
+    private static func testCloseIsNotHeldForeverByAStuckDevice(_ c: CheckContext) {
+        // The wait is bounded. A device held open by something unrelated must
+        // not keep the session alive indefinitely.
+        let h = Harness()
+        h.pressVoiceKey()
+        h.deviceHeld = true
+        h.secondPress()
+        h.run(seconds: 3.0)
+        c.expect(
+            h.routeChanges.contains(false),
+            "a permanently held device still closes eventually"
+        )
+        c.expect(
+            h.coordinator.debugSnapshot.phase == "closed",
+            "the grace period is bounded, not a wait forever"
+        )
+    }
+
+    private static func testCloseDoesNotWaitWhenNothingHoldsIt(_ c: CheckContext) {
+        let h = Harness()
+        h.pressVoiceKey()
+        h.secondPress()
+        h.run(seconds: 0.2)
+        c.expect(
+            h.routeChanges.contains(false),
+            "an unheld device closes at the normal pace"
         )
     }
 
