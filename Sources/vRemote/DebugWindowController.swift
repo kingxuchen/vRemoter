@@ -550,8 +550,10 @@ private struct StudioMixerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Padded rather than given a fixed height: the header's own surface
+            // then fills the space it occupies, instead of leaving a gap under
+            // the bar that nothing draws in.
             header
-                .frame(height: 68)
             if model.selectedPage == .mixer {
                 Spacer().frame(height: 15)
                 mixer
@@ -633,6 +635,7 @@ private struct StudioMixerView: View {
             }
         }
         .padding(.horizontal, 20)
+        .padding(.vertical, 11)
         .background(panelBackground(ConsoleTheme.surface, radius: 19))
     }
 
@@ -825,21 +828,24 @@ private struct KeyMappingView: View {
 
     var body: some View {
         VStack(spacing: 14) {
+            // No fixed height: the panel sizes to its copy, and the space it
+            // used to reserve goes to the mapping list below, which was
+            // scrolling past rows that fit.
             triggerPanel
-                .frame(height: 116)
             HStack(spacing: 14) {
                 devicePanel
-                    .frame(width: 238)
+                    .frame(width: 232)
                 mappingPanel
             }
         }
     }
 
     private var triggerPanel: some View {
-        HStack(spacing: 18) {
-            VStack(alignment: .leading, spacing: 7) {
+        HStack(alignment: .top, spacing: 18) {
+            VStack(alignment: .leading, spacing: 9) {
                 HStack(spacing: 7) {
                     Image(systemName: "waveform.badge.mic")
+                        .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(ConsoleTheme.green)
                     Text(L10n.text("语音触发键", "Voice trigger key"))
                         .font(.system(size: 17, weight: .semibold))
@@ -851,9 +857,10 @@ private struct KeyMappingView: View {
                 ))
                     .font(.system(size: 12.5))
                     .foregroundStyle(ConsoleTheme.secondary)
+                    .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 10)
+            Spacer(minLength: 12)
             VStack(alignment: .trailing, spacing: 7) {
                 shortcutRecorderField
                 if let rejection = model.shortcutRecordingRejected {
@@ -875,6 +882,7 @@ private struct KeyMappingView: View {
             }
         }
         .padding(.horizontal, 19)
+        .padding(.vertical, 13)
         .background(panelBackground(ConsoleTheme.surface, radius: 17))
     }
 
