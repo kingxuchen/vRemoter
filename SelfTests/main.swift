@@ -78,3 +78,226 @@ do {
     FileHandle.standardError.write(Data("FAIL: \(error)\n".utf8))
     exit(1)
 }
+
+// MARK: - Shortcut value type
+
+// The left/right distinction is the whole point of this type: the previous
+// trigger stored both key codes for one concept and picked the smaller one, so
+// the right-hand variants could never be sent. Right Command — the trigger used
+// by the voice input target this project is being generalized for — was among
+// the casualties.
+func testShortcutDistinguishesLeftFromRight() {
+    let rightCommand = Shortcut(keyCode: ShortcutKey.rightCommand, modifierFlags: 0)
+    let leftCommand = Shortcut(keyCode: ShortcutKey.leftCommand, modifierFlags: 0)
+
+    require(
+        rightCommand != leftCommand,
+        "left and right Command must not collapse into one value"
+    )
+    require(
+        rightCommand.displayText.contains("右"),
+        "right Command must be distinguishable in the echoed text"
+    )
+    require(
+        leftCommand.displayText.contains("左"),
+        "left Command must be distinguishable in the echoed text"
+    )
+}
+
+func testShortcutCarriesCombinationWithMainKey() {
+    let optionSpace = Shortcut(
+        keyCode: ShortcutKey.space,
+        modifierFlags: ShortcutModifier.option
+    )
+    require(
+        optionSpace.displayText.contains("⌥"),
+        "a combination with a main key must show its modifier"
+    )
+    require(
+        optionSpace.displayText.contains("空格"),
+        "a combination with a main key must name that key"
+    )
+}
+
+func testShortcutCarriesTwoModifiers() {
+    let controlShiftV = Shortcut(
+        keyCode: ShortcutKey.v,
+        modifierFlags: ShortcutModifier.control | ShortcutModifier.shift
+    )
+    let text = controlShiftV.displayText
+    require(
+        text.contains("⌃") && text.contains("⇧"),
+        "two modifiers must both be shown"
+    )
+    require(
+        text.range(of: "⌃")!.lowerBound < text.range(of: "⇧")!.lowerBound,
+        "modifiers must render in the macOS order ⌃ before ⇧"
+    )
+}
+
+func testShortcutRoundTripsAnObservedPress() {
+    // What the event tap reports for a real press is stored verbatim, so a
+    // bare modifier and a modified key are both representable without guessing.
+    // The value is deliberately arbitrary: this asserts pass-through, not
+    // interpretation.
+    let observed = Shortcut(keyCode: 0x0A, modifierFlags: ShortcutModifier.control)
+    require(
+        observed.keyCode == 0x0A && observed.modifierFlags == ShortcutModifier.control,
+        "a captured press must be stored exactly as observed, uninterpreted"
+    )
+}
+
+func testShortcutRejectsSystemReservedKeys() {
+    require(
+        !Shortcut.isCapturable(keyCode: ShortcutKey.brightnessUp),
+        "a system-reserved key must not be recordable"
+    )
+    require(
+        Shortcut.isCapturable(keyCode: ShortcutKey.rightCommand),
+        "an ordinary key must be recordable"
+    )
+}
+
+func testShortcutDownCarriesModifiersAndUpClearsThem() {
+    let optionSpace = Shortcut(
+        keyCode: ShortcutKey.space,
+        modifierFlags: ShortcutModifier.option
+    )
+    require(
+        optionSpace.downEvent().modifierFlags == ShortcutModifier.option,
+        "the key-down event must carry the modifiers"
+    )
+    require(
+        optionSpace.upEvent().modifierFlags == 0,
+        "the key-up event must clear modifiers so the target sees a clean release"
+    )
+    require(
+        optionSpace.upEvent().keyCode == ShortcutKey.space,
+        "the key-up event must repeat the same key"
+    )
+}
+
+func testShortcutDistinguishesWhetherAModifierWasAlsoHeld() {
+    // A real press of left Command may be reported either as a bare modifier or
+    // as that key with the Command flag set, depending on the source. Storing
+    // verbatim keeps both representable; keeping them distinct is what lets the
+    // picker later decide whether to normalise them.
+    let bare = Shortcut(keyCode: ShortcutKey.leftCommand, modifierFlags: 0)
+    let flagged = Shortcut(
+        keyCode: ShortcutKey.leftCommand,
+        modifierFlags: ShortcutModifier.command
+    )
+    require(
+        bare != flagged,
+        "a bare modifier and a flagged modifier must remain distinguishable"
+    )
+    require(
+        bare.displayText == flagged.displayText,
+        "both must read back the same, since a user pressed one key"
+    )
+}
+
+func testShortcutNamesLettersByKeyboardLayoutNotAlphabet() {
+    // `kVK_ANSI_*` is the US keyboard layout, not the alphabet: V is 0x09 and S
+    // is 0x01, while 0x12 is the digit 1. An earlier draft derived letter names
+    // arithmetically from the key code and rendered every letter wrong.
+    require(
+        Shortcut(keyCode: ShortcutKey.v, modifierFlags: 0).displayText == "V",
+        "V must render as V"
+    )
+    require(
+        Shortcut(keyCode: 0x01, modifierFlags: 0).displayText == "S",
+        "key code 0x01 is S, not a letter derived from its position"
+    )
+    require(
+        Shortcut(keyCode: 0x12, modifierFlags: 0).displayText == "1",
+        "key code 0x12 is the digit 1, not the 19th letter"
+    )
+    require(
+        Shortcut(keyCode: 0x16, modifierFlags: 0).displayText == "6",
+        "the digit row is not in numeric order on a US layout"
+    )
+}
+
+// MARK: - Shortcut migration
+
+func testShortcutMigrationDistinguishesThreeCases() {
+    let option = Shortcut(
+        keyCode: ShortcutKey.leftOption,
+        modifierFlags: ShortcutModifier.option
+    )
+
+    // 1. The user chose a trigger explicitly under the old picker.
+    require(
+        ShortcutMigration.decide(
+            persistedTriggerKey: "command",
+            hasOtherPersistedSettings: true
+        ) == .stored(Shortcut(
+            keyCode: ShortcutKey.leftCommand,
+            modifierFlags: ShortcutModifier.command
+        )),
+        "an explicitly stored legacy value must migrate to that exact shortcut"
+    )
+
+    // 2. A legacy user who never touched the picker. The old default was never
+    //    written to storage, so it must be reconstructed here or these users
+    //    would silently lose their trigger.
+    require(
+        ShortcutMigration.decide(
+            persistedTriggerKey: nil,
+            hasOtherPersistedSettings: true
+        ) == .legacyImplicit(option),
+        "a legacy user who never set a trigger must keep the old behavior"
+    )
+
+    // 3. A fresh install gets nothing: there is no shortcut to guess at.
+    require(
+        ShortcutMigration.decide(
+            persistedTriggerKey: nil,
+            hasOtherPersistedSettings: false
+        ) == .freshInstall,
+        "a fresh install must not be given a default shortcut"
+    )
+}
+
+func testShortcutMigrationFallsBackOnUnrecognisedLegacyValue() {
+    let fallback = ShortcutMigration.decide(
+        persistedTriggerKey: "left-elbow",
+        hasOtherPersistedSettings: true
+    )
+    require(
+        fallback == .legacyImplicit(Shortcut(
+            keyCode: ShortcutKey.leftOption,
+            modifierFlags: ShortcutModifier.option
+        )),
+        "an unrecognised stored value must fall back, not crash or guess"
+    )
+}
+
+// MARK: - Shortcut self-test entry
+
+func runShortcutSelfTests() {
+    testShortcutDistinguishesLeftFromRight()
+    testShortcutCarriesCombinationWithMainKey()
+    testShortcutCarriesTwoModifiers()
+    testShortcutRoundTripsAnObservedPress()
+    testShortcutRejectsSystemReservedKeys()
+    testShortcutNamesLettersByKeyboardLayoutNotAlphabet()
+    testShortcutDownCarriesModifiersAndUpClearsThem()
+    testShortcutDistinguishesWhetherAModifierWasAlsoHeld()
+    testShortcutMigrationDistinguishesThreeCases()
+    testShortcutMigrationFallsBackOnUnrecognisedLegacyValue()
+
+    print("PASS: left/right variants stay distinct")
+    print("PASS: combinations with a main key are representable")
+    print("PASS: two-modifier combinations render in macOS order")
+    print("PASS: a captured press is stored verbatim")
+    print("PASS: system-reserved keys are not recordable")
+    print("PASS: letters are named by US layout, not by arithmetic")
+    print("PASS: key-down carries modifiers, key-up clears them")
+    print("PASS: bare and flagged modifier presses stay distinguishable")
+    print("PASS: migration separates stored / legacy-implicit / fresh install")
+    print("PASS: unrecognised legacy values fall back safely")
+}
+
+runShortcutSelfTests()
