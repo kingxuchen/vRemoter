@@ -1,16 +1,18 @@
 // vRemote for macOS.
 //
-// 1. Supported remote voice key → matching Option toggle semantics
-// 2. Remote ATVV + Mac microphone → aligned mix → vRemoteDr 2ch → Doubao
-// 3. A physical Mac Option key controls the same remote microphone session
+// 1. A remote voice-key press toggles the voice session: it emits the
+//    user's own shortcut and opens or closes the remote microphone
+// 2. Remote ATVV + Mac microphone → aligned mix → vRemoteDr 2ch, which any
+//    voice input app that can select an input device can read
+// 3. The physical Mac key the user recorded drives the same session
 //
 // macOS-only. Requires:
 //   * X6-Remote or Chromecast Remote paired in System Settings → Bluetooth
 //   * Accessibility permission (System Settings → Privacy & Security →
-//     Accessibility) for Option observation and Search suppression
+//     Accessibility) for trigger observation and Search suppression
 //   * vRemoteDriver.driver installed and visible as vRemoteDr 2ch in
 //     System Settings → Sound → Input/Output
-//   * Doubao IME configured for Option-as-voice-mode trigger
+//   * the voice input app set to read vRemoteDr 2ch
 //
 // Run:   swift run
 // Quit:  menu bar icon → 退出, or Ctrl+C
@@ -45,7 +47,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let x6 = X6HIDBridge()
     private let chromecastHID = ChromecastRemoteHIDBridge()
     private let x6SearchSuppressor = X6SearchSuppressor()
-    private let doubaoAudioState = DoubaoAudioStateMonitor()
     private lazy var x6Session = X6SessionCoordinator()
     private let debugWindow = DebugWindowController()
     private let updateWindow = UpdateWindowController()
@@ -473,12 +474,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateStatus() {
         let anyHID = x6HIDConnected || chromecastHIDConnected
         let anyBLE = x6BLEConnected || chromecastBLEConnected
-        let doubaoSnapshot = doubaoAudioState.snapshotNow()
-        let doubaoUsesVRemote = doubaoSnapshot.inputDeviceNames.contains("vRemoteDr 2ch")
         let statusText: String
-        if doubaoSnapshot.isRecording && !doubaoUsesVRemote {
-            statusText = L10n.text("豆包输入设备错误", "Incorrect Doubao input")
-        } else if remoteStreaming {
+        if remoteStreaming {
             statusText = L10n.text("遥控器录音中", "Remote recording")
         } else if anyHID && anyBLE {
             statusText = L10n.text("已就绪", "Ready")
@@ -496,8 +493,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             remoteStreaming: remoteStreaming,
             macInputEnabled: AudioPipe.shared.isMacInputEnabled,
             remoteInputEnabled: AudioPipe.shared.isRemoteInputEnabled,
-            doubaoIsRecording: doubaoSnapshot.isRecording,
-            doubaoInput: doubaoSnapshot.deviceSummary,
             driverAvailable: AudioPipe.shared.isOutputDeviceAvailable,
             x6Connected: x6HIDConnected || x6BLEConnected,
             chromecastConnected: chromecastHIDConnected || chromecastBLEConnected,
@@ -531,8 +526,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.x6BLE.closeMicrophone(force: true)
                 self?.chromecastBLE.closeMicrophone(force: true)
                 self?.debugWindow.updateRemoteLevel(-120)
-            } else if self?.doubaoAudioState.snapshotNow().isRecording == true {
-                self?.openPreferredRemoteMicrophone()
             }
             self?.updateStatus()
         }

@@ -156,7 +156,7 @@ final class X6SearchSuppressor {
         // macOS normally reports modifier edges as `flagsChanged`, but on
         // some keyboards/input-method paths the DOWN edge arrives as a plain
         // `keyDown` while the release still arrives as `flagsChanged`. V1 only
-        // listened to flagsChanged, so Doubao opened but vRemote missed the
+        // listened to flagsChanged, so the app opened but vRemote missed the
         // transition and kept its audio route closed.
         let isDown: Bool
         switch type {
