@@ -1261,26 +1261,34 @@ private struct MappingRow: View {
                 // 录制任意按键 leads the list. It is the only way to reach a key
                 // that has no named entry, and at the end of a thirty-item menu
                 // nobody scrolled far enough to know it was there.
+                // Every entry names itself. Using the current mapping's title
+                // here made the record-a-key entry render as whatever the
+                // button already did, so the one route to an unnamed key was
+                // hiding under another action's name.
                 ForEach(
                     [RemoteMappingTarget.custom]
                         + RemoteMappingTarget.allCases.filter {
                             $0 != .voiceInput && $0 != .custom
                         }
                 ) { target in
-                    Text(
-                        target == .custom
-                            ? mappings.targetTitle(
-                                for: button,
-                                remote: remote,
-                                gesture: gesture
-                            )
-                            : target.title
-                    ).tag(RemoteMappingTarget?.some(target))
+                    Text(target.title)
+                        .tag(RemoteMappingTarget?.some(target))
                 }
             }
             .labelsHidden()
             .frame(maxWidth: .infinity)
             if assigned == .custom {
+                // The menu entry now names itself, so the recorded key lives
+                // here instead — next to the button that re-records it.
+                Text(mappings.targetTitle(
+                    for: button,
+                    remote: remote,
+                    gesture: gesture
+                ))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(ConsoleTheme.green)
+                    .lineLimit(1)
+                    .help(L10n.text("已录制的按键", "Recorded key"))
                 Button { recordingGesture = gesture } label: {
                     Image(systemName: "record.circle")
                         .font(.system(size: 12))
