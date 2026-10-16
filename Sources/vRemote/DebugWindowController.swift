@@ -1258,7 +1258,15 @@ private struct MappingRow: View {
                     Text(L10n.text("同单击", "Uses tap"))
                         .tag(RemoteMappingTarget?.none)
                 }
-                ForEach(RemoteMappingTarget.allCases.filter { $0 != .voiceInput }) { target in
+                // 录制任意按键 leads the list. It is the only way to reach a key
+                // that has no named entry, and at the end of a thirty-item menu
+                // nobody scrolled far enough to know it was there.
+                ForEach(
+                    [RemoteMappingTarget.custom]
+                        + RemoteMappingTarget.allCases.filter {
+                            $0 != .voiceInput && $0 != .custom
+                        }
+                ) { target in
                     Text(
                         target == .custom
                             ? mappings.targetTitle(
