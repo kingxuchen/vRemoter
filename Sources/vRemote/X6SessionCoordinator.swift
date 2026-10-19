@@ -233,6 +233,41 @@ final class X6SessionCoordinator {
         requestRemoteTransportOpen(active, bypassDebounce: true, attempt: 1)
     }
 
+    /// One press of a button the user mapped to Escape.
+    ///
+    /// The same toggle as the voice key, from a button that is always reported,
+    /// so the session stays reachable when the voice key itself is not. It does
+    /// not go through `voiceKeyPressed`: a mapped press carries no transport
+    /// reason, so the physical-press test has nothing to judge it by, and the
+    /// 0.25s duplicate-edge window belongs to a press announced over BLE *and*
+    /// HID — swallowing the second of two real taps here would leave the button
+    /// needing a deliberate pause to work.
+    func mappedKeyPressed() {
+        guard triggerAvailable() else {
+            print("[VOICE-SESSION] no shortcut configured; mapped key ignored")
+            return
+        }
+        guard let remote = preferredRemoteProvider?() else {
+            print("[VOICE-SESSION] mapped key with no remote attached")
+            return
+        }
+        switch phase {
+        case .closed, .opening:
+            beginOpening(
+                owner: .remote,
+                remote: remote,
+                sendTrigger: true,
+                requestTransportImmediately: true
+            )
+        case .open:
+            beginClosing(sendTrigger: true, reason: "mapped key toggle")
+        case .closing:
+            // Same reading as a voice press mid-close: the user is most likely
+            // still letting go of the previous one, not asking to reverse.
+            print("[VOICE-SESSION] mapped key while closing ignored")
+        }
+    }
+
     func remoteHIDShortPress() {
         guard let remote = preferredRemoteProvider?() else {
             print("[VOICE-SESSION] HID short press with no remote attached")

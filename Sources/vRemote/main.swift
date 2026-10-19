@@ -257,6 +257,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         x6Session.preferredRemoteProvider = { [weak self] in
             self?.preferredVoiceRemote()
         }
+        RemoteMappingStore.onEscapeMapped = { [weak self] in
+            // A mapped button arrives on the remote's HID queue while the voice
+            // key arrives on the main queue. The session's own phase is shared
+            // state, so both paths have to enter it from one queue.
+            DispatchQueue.main.async {
+                self?.x6Session.mappedKeyPressed()
+            }
+        }
         x6Session.onMicrophoneCloseRequested = { [weak self] in
             self?.closeAllRemoteMicrophones()
         }

@@ -291,6 +291,15 @@ struct RemoteCustomShortcut: Codable, Hashable {
 final class RemoteMappingStore: ObservableObject {
     static let shared = RemoteMappingStore()
 
+    /// Called when one complete press of a button resolves to Escape.
+    ///
+    /// Escape is the one mapped action that also drives the remote's own
+    /// microphone: the keystroke still goes out to the app in front, and this
+    /// toggles the voice session, so a button can stand in for a voice key that
+    /// never reports. Set once by the app at launch; nil leaves the mapping
+    /// behaving exactly as before.
+    static var onEscapeMapped: (() -> Void)?
+
     @Published private(set) var revision = 0
     private let defaults = UserDefaults.standard
     private let prefix = "remoteMapping."
@@ -524,6 +533,15 @@ final class RemoteMappingStore: ObservableObject {
         remote: SupportedRemoteID,
         gesture: RemoteGesture
     ) {
+        // Every complete press of every gesture ends up here — the immediate tap
+        // and the resolved tap, double tap and long press alike — so this is the
+        // one place that can reach the microphone without the mapping knowing
+        // which remote or which button it belongs to. A held repeat calls
+        // `post` directly and is deliberately not routed through it: holding a
+        // button must not toggle the session sixty times a second.
+        if target(for: button, remote: remote, gesture: gesture) == .escape {
+            Self.onEscapeMapped?()
+        }
         post(button: button, remote: remote, gesture: gesture, isDown: true)
         post(button: button, remote: remote, gesture: gesture, isDown: false)
     }

@@ -102,6 +102,11 @@ enum VoiceSessionSelfTest {
             advance(1.0)
             pressVoiceKey(remote)
         }
+
+        /// A button the user mapped to Escape, pressed.
+        func pressMappedKey() {
+            coordinator.mappedKeyPressed()
+        }
     }
 
     private final class CheckContext {
@@ -145,6 +150,11 @@ enum VoiceSessionSelfTest {
         testNoShortcutMeansNoEmission(checks)
         testIndependentRemotesToggleOnce(checks)
         testDebouncedRetry(checks)
+        testMappedKeyOpensWithoutATransportReason(checks)
+        testMappedKeyTogglesBackOff(checks)
+        testRapidMappedPressesBothCount(checks)
+        testMappedKeyWithNoRemoteChangesNothing(checks)
+        testMappedKeyWithoutAShortcutDoesNothing(checks)
         emit("[SELF-TEST] completed failures=\(checks.failures)")
         return checks.failures == 0
     }
@@ -436,6 +446,115 @@ enum VoiceSessionSelfTest {
         c.expect(
             h.coordinator.debugSnapshot.openRequestedRemote == .chromecast,
             "only the sent retry becomes pending"
+        )
+    }
+
+    // MARK: - A button mapped to Escape
+
+    private static func testMappedKeyOpensWithoutATransportReason(_ c: CheckContext) {
+        // A mapped press carries no ATVV reason code. The physical-press test
+        // that keeps a microphone acknowledgement from toggling twice has
+        // nothing to judge it by, and wrongly rejecting it here would leave
+        // Escape doing nothing on the Chromecast remote, whose real press
+        // reason (0x03) a mapping cannot supply.
+        let h = Harness()
+        h.preferredRemote = .chromecast
+        h.pressMappedKey()
+        c.expect(h.triggerTapCount == 1, "a mapped press emits the voice shortcut")
+        c.expect(h.routeChanges == [true], "a mapped press opens the audio route")
+        c.expect(h.openRequests.count == 1, "a mapped press opens the remote microphone")
+        c.expect(
+            h.openRequests.first?.0 == .chromecast,
+            "it opens the preferred remote, whatever the reason code would have been"
+        )
+        c.expect(
+            h.coordinator.debugSnapshot.phase == "open",
+            "a mapped press leaves the session open"
+        )
+    }
+
+    private static func testMappedKeyTogglesBackOff(_ c: CheckContext) {
+        // The reason the Escape mapping exists: with the remote already
+        // recording, the next press has to cancel it. A remote that is
+        // streaming by itself answers the open request with `alreadyStreaming`,
+        // which is what puts it in the coordinator's streaming set — and what
+        // makes cancelling it actually close the microphone.
+        let h = Harness()
+        h.openResults = [.alreadyStreaming]
+        h.pressMappedKey()
+        h.advance(1.0)
+        h.pressMappedKey()
+        c.expect(
+            h.coordinator.debugSnapshot.phase == "closing",
+            "a mapped press while recording cancels it"
+        )
+        c.expect(h.triggerTapCount == 2, "closing emits the shortcut so the app stops")
+        c.expect(
+            h.openRequests.count == 1,
+            "closing never reopens the microphone"
+        )
+        h.run(seconds: 0.35)
+        c.expect(
+            h.coordinator.debugSnapshot.phase == "closed",
+            "the cancelled session settles back to closed"
+        )
+        c.expect(
+            h.closeCalls == 1,
+            "cancelling really closes a streaming remote's microphone"
+        )
+        // Not `== [true, false]`: the close path calls setRemoteRouteActive(false)
+        // twice today (finishClosing → closeRouteAndTransports, then
+        // finalizeClosed → closeRouteAndTransports). Harmless — it is an
+        // idempotent setter — and pre-existing, so this asserts the thing the
+        // user cares about: the route ends up off.
+        c.expect(
+            h.routeChanges.last == false,
+            "cancelling leaves the audio route off"
+        )
+    }
+
+    private static func testRapidMappedPressesBothCount(_ c: CheckContext) {
+        // The 0.25s debounce exists because one physical press is announced
+        // over BLE and HID at once. These are two real taps, and reusing
+        // voiceKeyPressed would drop the second one.
+        let h = Harness()
+        h.pressMappedKey()
+        h.advance(0.05)
+        h.pressMappedKey()
+        c.expect(
+            h.triggerTapCount == 2,
+            "two quick presses both register — the duplicate-edge window must not swallow the second"
+        )
+        c.expect(
+            h.coordinator.debugSnapshot.phase == "closing",
+            "two quick presses return the session to closing"
+        )
+    }
+
+    private static func testMappedKeyWithNoRemoteChangesNothing(_ c: CheckContext) {
+        // The button that was pressed may belong to a remote that has since
+        // disconnected. That must be a no-op, not a half-open session.
+        let h = Harness()
+        h.preferredRemote = nil
+        h.pressMappedKey()
+        c.expect(
+            h.coordinator.debugSnapshot.phase == "closed",
+            "with no remote attached nothing opens"
+        )
+        c.expect(h.triggerTapCount == 0, "with no remote attached nothing is emitted")
+        c.expect(h.routeChanges.isEmpty, "with no remote attached the route is untouched")
+    }
+
+    private static func testMappedKeyWithoutAShortcutDoesNothing(_ c: CheckContext) {
+        // Same rule as the voice key: a microphone with nothing recording behind
+        // it reads as a broken mic, so no shortcut means no session.
+        let h = Harness(shortcutConfigured: false)
+        h.pressMappedKey()
+        c.expect(h.triggerTapCount == 0, "no configured shortcut means no emission")
+        c.expect(h.openRequests.isEmpty, "no configured shortcut means no open request")
+        c.expect(
+            h.coordinator.debugSnapshot.phase == "closed",
+            "no configured shortcut means no session"
         )
     }
 }
