@@ -235,35 +235,29 @@ final class X6SessionCoordinator {
 
     /// One press of a button the user mapped to Escape.
     ///
-    /// The same toggle as the voice key, from a button that is always reported,
-    /// so the session stays reachable when the voice key itself is not. It does
-    /// not go through `voiceKeyPressed`: a mapped press carries no transport
-    /// reason, so the physical-press test has nothing to judge it by, and the
-    /// 0.25s duplicate-edge window belongs to a press announced over BLE *and*
-    /// HID — swallowing the second of two real taps here would leave the button
-    /// needing a deliberate pause to work.
+    /// This button only ever stops. Pressing it while the remote is recording
+    /// ends the session; pressing it otherwise does nothing at all. It is a
+    /// brake, not a switch: the voice key owns opening, so a stray Escape can
+    /// never start a microphone the user did not ask for.
+    ///
+    /// It does not go through `voiceKeyPressed`, whose two gates do not fit a
+    /// mapped button. A mapped press carries no transport reason, so the
+    /// physical-press test has nothing to judge it by and would reject it
+    /// outright on the Chromecast, whose real press reason (0x03) a mapping
+    /// cannot supply. And the 0.25s duplicate-edge window exists for one press
+    /// announced over both BLE and HID; it is meaningless here.
     func mappedKeyPressed() {
-        guard triggerAvailable() else {
-            print("[VOICE-SESSION] no shortcut configured; mapped key ignored")
-            return
-        }
-        guard let remote = preferredRemoteProvider?() else {
-            print("[VOICE-SESSION] mapped key with no remote attached")
-            return
-        }
         switch phase {
-        case .closed, .opening:
-            beginOpening(
-                owner: .remote,
-                remote: remote,
-                sendTrigger: true,
-                requestTransportImmediately: true
-            )
-        case .open:
-            beginClosing(sendTrigger: true, reason: "mapped key toggle")
+        case .closed:
+            // The state the button asks for already holds. Emitting the voice
+            // shortcut "to make sure" would type into whatever app is in front
+            // for no reason, so this is a deliberate no-op.
+            print("[VOICE-SESSION] mapped key with nothing recording ignored")
+        case .opening, .open:
+            beginClosing(sendTrigger: true, reason: "mapped key")
         case .closing:
-            // Same reading as a voice press mid-close: the user is most likely
-            // still letting go of the previous one, not asking to reverse.
+            // Already on its way down. Repeating the request would emit the
+            // shortcut again and type it into the front app a second time.
             print("[VOICE-SESSION] mapped key while closing ignored")
         }
     }
