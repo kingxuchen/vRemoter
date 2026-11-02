@@ -160,6 +160,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         x6.onNativeSearchEdge = { [weak self] in
             self?.x6SearchSuppressor.arm()
         }
+        x6.onMappedKeyEdge = { [weak self] keyCode, isDown in
+            self?.x6SearchSuppressor.noteMappedKeyEdge(keyCode: keyCode, isDown: isDown)
+        }
+        x6.onMappedSystemButtonEdge = { [weak self] isDown in
+            self?.x6SearchSuppressor.noteMappedSystemButtonEdge(isDown: isDown)
+        }
+        x6.onMappedStateReset = { [weak self] in
+            self?.x6SearchSuppressor.resetMappedState()
+        }
         x6SearchSuppressor.onTriggerDownObserved = { [weak self] synthetic in
             self?.x6Session.triggerDownObserved(isSynthetic: synthetic)
         }
@@ -186,6 +195,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         x6BLE.onAudioStarted = { [weak self] reason, _ in
             self?.lastVoiceRemote = .x6
+            self?.x6SearchSuppressor.arm()
             self?.x6Session.voiceKeyPressed(remote: .x6, reason: reason)
         }
         x6BLE.onAudioStopped = { [weak self] reason in

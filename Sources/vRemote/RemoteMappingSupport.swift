@@ -263,6 +263,7 @@ enum RemoteMappingTarget: String, CaseIterable, Identifiable, Codable, Hashable 
                 data1: data1,
                 data2: -1
             )?.cgEvent else { return }
+            event.setIntegerValueField(.eventSourceUserData, value: Key.syntheticMarker)
             event.post(tap: .cghidEventTap)
         }
         post(state: 0xA)

@@ -63,6 +63,9 @@ final class X6HIDBridge {
     var onConnectionChanged: ((Bool) -> Void)?
     var onConsumerUsageChanged: ((UInt16) -> Void)?
     var onNativeSearchEdge: (() -> Void)?
+    var onMappedKeyEdge: ((CGKeyCode, Bool) -> Void)?
+    var onMappedSystemButtonEdge: ((Bool) -> Void)?
+    var onMappedStateReset: (() -> Void)?
     /// Physical Search-down. Used only to pre-arm the remote audio route.
     var onPhysicalVoiceDown: (() -> Void)?
     /// Semantic events; each physical gesture produces exactly one path.
@@ -83,15 +86,16 @@ final class X6HIDBridge {
     private var remappingEnabled = RemoteMappingStore.shared.isEnabled(.x6)
     private lazy var arbiter = RemoteGestureArbiter(remote: .x6)
     private var mappedKeyboardUsages = Set<UInt8>()
-    private var passthroughKeyboardUsages = Set<UInt8>()
-    private var lastKeyboardModifiers: UInt8 = 0
     private var lastSystemUsage: UInt8 = 0
-    private var lastMouseButtons: UInt8 = 0
 
     func setRemappingEnabled(_ enabled: Bool) {
         guard remappingEnabled != enabled else { return }
         remappingEnabled = enabled
-        start()
+        resetMappingState()
+        print("[X6] remapping mode=\(enabled ? "remap" : "observe")")
+        if manager == nil {
+            start()
+        }
     }
 
     func start() {
@@ -129,13 +133,12 @@ final class X6HIDBridge {
             CFRunLoopGetMain(),
             CFRunLoopMode.commonModes.rawValue
         )
-        // X6 exposes keyboard, consumer and mouse collections. Opening the
-        // manager with seize applies the remapping boundary to every matching
-        // collection instead of leaving a system-facing interface live.
-        let openOptions = remappingEnabled
-            ? IOOptionBits(kIOHIDOptionsTypeSeizeDevice)
-            : IOOptionBits(kIOHIDOptionsTypeNone)
-        let result = IOHIDManagerOpen(manager, openOptions)
+        // X6's primary HID usage is Keyboard (0x01/0x06), which macOS refuses
+        // to seize from non-root processes (`kIOReturnNotPrivileged`). Keep the
+        // manager open in non-exclusive mode so voice/Search suppression and
+        // button reports always stay live, while `X6SearchSuppressor` drops the
+        // native macOS events for remapped buttons at the event tap.
+        let result = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         guard result == kIOReturnSuccess else {
             print(
                 "[X6] HID manager open failed: 0x" +
@@ -167,11 +170,7 @@ final class X6HIDBridge {
             }
         }
         activeDevice = nil
-        mappedKeyboardUsages.removeAll()
-        passthroughKeyboardUsages.removeAll()
-        lastKeyboardModifiers = 0
-        lastSystemUsage = 0
-        lastMouseButtons = 0
+        resetMappingState()
         onConnectionChanged?(false)
         guard let manager else { return }
         IOHIDManagerUnscheduleFromRunLoop(
@@ -206,7 +205,7 @@ final class X6HIDBridge {
         guard let activeDevice, CFEqual(activeDevice, device) else { return }
         self.activeDevice = nil
         lastConsumerUsage = 0
-        arbiter.reset()
+        resetMappingState()
         onConnectionChanged?(false)
         print("[X6] disconnected")
     }
@@ -233,7 +232,8 @@ final class X6HIDBridge {
             logSmallReport(name: "system", reportID: reportID, data: payload)
             if remappingEnabled { handleSystemMapping(payload) }
         case 0x04:
-            if remappingEnabled { passthroughMouse(payload) }
+            // Mouse reports are delivered natively by macOS in non-seized mode.
+            break
         case Self.voiceDataReportID:
             handleVoiceData(payload)
         default:
@@ -243,46 +243,21 @@ final class X6HIDBridge {
 
     private func handleKeyboardMapping(_ data: Data) {
         guard data.count >= 2 else { return }
-        let modifiers = data[data.startIndex]
-        X6KeyboardPassthrough.postModifierChanges(
-            from: lastKeyboardModifiers,
-            to: modifiers
-        )
-        lastKeyboardModifiers = modifiers
-
         let usages = Set(data.dropFirst(2).filter { $0 != 0 })
         let releasedMapped = mappedKeyboardUsages.subtracting(usages)
-        let releasedPassthrough = passthroughKeyboardUsages.subtracting(usages)
-        let pressed = usages.subtracting(
-            mappedKeyboardUsages.union(passthroughKeyboardUsages)
-        )
+        let pressed = usages.subtracting(mappedKeyboardUsages)
 
         for usage in releasedMapped {
             apply(buttonID: String(format: "k%02X", usage), isDown: false)
-        }
-        for usage in releasedPassthrough {
-            X6KeyboardPassthrough.post(
-                usage: usage,
-                modifiers: modifiers,
-                isDown: false
-            )
         }
         for usage in pressed {
             let id = String(format: "k%02X", usage)
             if RemoteProfiles.x6Buttons.contains(where: { $0.id == id }) {
                 mappedKeyboardUsages.insert(usage)
                 apply(buttonID: id, isDown: true)
-            } else if usage != 0xAA {
-                passthroughKeyboardUsages.insert(usage)
-                X6KeyboardPassthrough.post(
-                    usage: usage,
-                    modifiers: modifiers,
-                    isDown: true
-                )
             }
         }
         mappedKeyboardUsages.formIntersection(usages)
-        passthroughKeyboardUsages.formIntersection(usages)
     }
 
     private func handleConsumerMapping(_ data: Data) {
@@ -291,7 +266,7 @@ final class X6HIDBridge {
             | UInt16(data[data.index(after: data.startIndex)]) << 8
         let previous = lastConsumerUsage
         guard usage != previous else { return }
-        if previous != 0 {
+        if previous != 0, previous != 0x0221 {
             apply(buttonID: "c" + String(format: "%X", previous), isDown: false)
         }
         if usage != 0, usage != 0x0221 {
@@ -317,6 +292,11 @@ final class X6HIDBridge {
         guard let button = RemoteProfiles.x6Buttons.first(
             where: { $0.id == buttonID }
         ) else { return }
+        if let keyCode = X6MappedKeyCode.keyCode(forButtonID: buttonID) {
+            onMappedKeyEdge?(keyCode, isDown)
+        } else {
+            onMappedSystemButtonEdge?(isDown)
+        }
         arbiter.edge(button: button, isDown: isDown)
         print(
             "[X6-MAP] \(button.title) " +
@@ -325,55 +305,11 @@ final class X6HIDBridge {
         )
     }
 
-    private func passthroughMouse(_ data: Data) {
-        guard data.count >= 4 else { return }
-        let buttons = data[data.startIndex]
-        let dx = CGFloat(Int(Int8(bitPattern: data[data.index(data.startIndex, offsetBy: 1)])))
-        let dy = CGFloat(Int(Int8(bitPattern: data[data.index(data.startIndex, offsetBy: 2)])))
-        let wheel = Int32(Int(Int8(bitPattern: data[data.index(data.startIndex, offsetBy: 3)])))
-        let location = CGEvent(source: nil)?.location ?? .zero
-        let next = CGPoint(x: location.x + dx, y: location.y + dy)
-
-        let leftDown = buttons & 0x01 != 0
-        let rightDown = buttons & 0x02 != 0
-        let lastLeftDown = lastMouseButtons & 0x01 != 0
-        let lastRightDown = lastMouseButtons & 0x02 != 0
-        let type: CGEventType
-        let button: CGMouseButton
-        if leftDown != lastLeftDown {
-            type = leftDown ? .leftMouseDown : .leftMouseUp
-            button = .left
-        } else if rightDown != lastRightDown {
-            type = rightDown ? .rightMouseDown : .rightMouseUp
-            button = .right
-        } else if leftDown {
-            type = .leftMouseDragged
-            button = .left
-        } else if rightDown {
-            type = .rightMouseDragged
-            button = .right
-        } else {
-            type = .mouseMoved
-            button = .left
-        }
-        CGEvent(
-            mouseEventSource: nil,
-            mouseType: type,
-            mouseCursorPosition: next,
-            mouseButton: button
-        )?.post(tap: .cghidEventTap)
-        lastMouseButtons = buttons
-
-        if wheel != 0 {
-            CGEvent(
-                scrollWheelEvent2Source: nil,
-                units: .line,
-                wheelCount: 1,
-                wheel1: wheel,
-                wheel2: 0,
-                wheel3: 0
-            )?.post(tap: .cghidEventTap)
-        }
+    private func resetMappingState() {
+        mappedKeyboardUsages.removeAll()
+        lastSystemUsage = 0
+        arbiter.reset()
+        onMappedStateReset?()
     }
 
     private func handleConsumerReport(_ data: Data) {
@@ -449,6 +385,7 @@ final class X6HIDBridge {
         deferredVoiceRelease = nil
         voiceGestureActive = true
         print("[X6] voice DOWN source=\(source)")
+        onNativeSearchEdge?()
         onPhysicalVoiceDown?()
     }
 
@@ -544,77 +481,20 @@ final class X6HIDBridge {
     }
 }
 
-private enum X6KeyboardPassthrough {
-    private static let modifierKeyCodes: [(mask: UInt8, keyCode: CGKeyCode)] = [
-        (0x01, 0x3B), (0x02, 0x38), (0x04, 0x3A), (0x08, 0x37),
-        (0x10, 0x3E), (0x20, 0x3C), (0x40, 0x3D), (0x80, 0x36),
+enum X6MappedKeyCode {
+    private static let buttonKeyCodes: [String: CGKeyCode] = [
+        "k2A": 0x33, // Delete
+        "k65": 0x6E, // Menu / Context
+        "k52": 0x7E, // Up
+        "k51": 0x7D, // Down
+        "k50": 0x7B, // Left
+        "k4F": 0x7C, // Right
+        "k28": 0x24, // OK / Return
+        "k4B": 0x74, // Page Up
+        "k4E": 0x79, // Page Down
     ]
 
-    private static let keyCodes: [UInt8: CGKeyCode] = [
-        0x04: 0x00, 0x05: 0x0B, 0x06: 0x08, 0x07: 0x02,
-        0x08: 0x0E, 0x09: 0x03, 0x0A: 0x05, 0x0B: 0x04,
-        0x0C: 0x22, 0x0D: 0x26, 0x0E: 0x28, 0x0F: 0x25,
-        0x10: 0x2E, 0x11: 0x2D, 0x12: 0x1F, 0x13: 0x23,
-        0x14: 0x0C, 0x15: 0x0F, 0x16: 0x01, 0x17: 0x11,
-        0x18: 0x20, 0x19: 0x09, 0x1A: 0x0D, 0x1B: 0x07,
-        0x1C: 0x10, 0x1D: 0x06,
-        0x1E: 0x12, 0x1F: 0x13, 0x20: 0x14, 0x21: 0x15,
-        0x22: 0x17, 0x23: 0x16, 0x24: 0x1A, 0x25: 0x1C,
-        0x26: 0x19, 0x27: 0x1D,
-        0x28: 0x24, 0x29: 0x35, 0x2A: 0x33, 0x2B: 0x30,
-        0x2C: 0x31, 0x2D: 0x1B, 0x2E: 0x18, 0x2F: 0x21,
-        0x30: 0x1E, 0x31: 0x2A, 0x33: 0x29, 0x34: 0x27,
-        0x35: 0x32, 0x36: 0x2B, 0x37: 0x2F, 0x38: 0x2C,
-        0x39: 0x39,
-        0x3A: 0x7A, 0x3B: 0x78, 0x3C: 0x63, 0x3D: 0x76,
-        0x3E: 0x60, 0x3F: 0x61, 0x40: 0x62, 0x41: 0x64,
-        0x42: 0x65, 0x43: 0x6D, 0x44: 0x67, 0x45: 0x6F,
-        0x4A: 0x73, 0x4B: 0x74, 0x4D: 0x77, 0x4E: 0x79,
-        0x4F: 0x7C, 0x50: 0x7B, 0x51: 0x7D, 0x52: 0x7E,
-        0x54: 0x4B, 0x55: 0x43, 0x56: 0x4E, 0x57: 0x45,
-        0x58: 0x4C, 0x59: 0x53, 0x5A: 0x54, 0x5B: 0x55,
-        0x5C: 0x56, 0x5D: 0x57, 0x5E: 0x58, 0x5F: 0x59,
-        0x60: 0x5B, 0x61: 0x5C, 0x62: 0x52, 0x63: 0x41,
-    ]
-
-    static func postModifierChanges(from old: UInt8, to new: UInt8) {
-        for entry in modifierKeyCodes where (old & entry.mask) != (new & entry.mask) {
-            let isDown = new & entry.mask != 0
-            guard let event = CGEvent(
-                keyboardEventSource: CGEventSource(stateID: .hidSystemState),
-                virtualKey: entry.keyCode,
-                keyDown: isDown
-            ) else { continue }
-            event.flags = flags(from: new)
-            event.setIntegerValueField(.eventSourceUserData, value: Key.syntheticMarker)
-            event.post(tap: .cghidEventTap)
-        }
-    }
-
-    static func post(usage: UInt8, modifiers: UInt8, isDown: Bool) {
-        guard let keyCode = keyCodes[usage],
-              let event = CGEvent(
-                keyboardEventSource: CGEventSource(stateID: .hidSystemState),
-                virtualKey: keyCode,
-                keyDown: isDown
-              )
-        else {
-            if isDown {
-                print(String(format: "[X6-MAP] unmapped keyboard usage=0x%02X", usage))
-            }
-            return
-        }
-        event.flags = flags(from: modifiers)
-        event.setIntegerValueField(.eventSourceUserData, value: Key.syntheticMarker)
-        event.post(tap: .cghidEventTap)
-    }
-
-    private static func flags(from modifiers: UInt8) -> CGEventFlags {
-        var result: CGEventFlags = []
-        if modifiers & 0x11 != 0 { result.insert(.maskControl) }
-        if modifiers & 0x22 != 0 { result.insert(.maskShift) }
-        if modifiers & 0x44 != 0 { result.insert(.maskAlternate) }
-        if modifiers & 0x88 != 0 { result.insert(.maskCommand) }
-        return result
+    static func keyCode(forButtonID buttonID: String) -> CGKeyCode? {
+        buttonKeyCodes[buttonID]
     }
 }

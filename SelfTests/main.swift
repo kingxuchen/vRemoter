@@ -787,3 +787,88 @@ func runShortcutSelfTests() {
 }
 
 runShortcutSelfTests()
+
+func runX6NativeEventGateSelfTests() {
+    let t0 = Date(timeIntervalSinceReferenceDate: 1_000)
+    var gate = X6NativeEventGate(suppressionDuration: 1.5, keyReleaseGraceDuration: 0.5)
+
+    require(
+        !gate.isSearchOrSystemArmed(at: t0),
+        "search gate starts disarmed"
+    )
+    gate.armSearch(at: t0)
+    require(
+        gate.isSearchOrSystemArmed(at: t0.addingTimeInterval(1.4)),
+        "voice search edge keeps the native Search gate armed across the suppression window"
+    )
+    require(
+        !gate.isSearchOrSystemArmed(at: t0.addingTimeInterval(1.6)),
+        "native Search gate closes once the suppression window expires"
+    )
+
+    // Mapped keyboard button: suppresses native keyDown, held auto-repeats, and
+    // the trailing keyUp, then immediately releases the key code so physical
+    // keyboard presses of the same key are not swallowed.
+    gate.noteMappedKeyEdge(keyCode: 0x24, isDown: true, at: t0)
+    require(
+        gate.shouldSuppressMappedKey(keyCode: 0x24, isKeyDown: true, isKeyUp: false, at: t0.addingTimeInterval(0.01)),
+        "native keyDown for a held mapped X6 button is suppressed"
+    )
+    require(
+        gate.shouldSuppressMappedKey(keyCode: 0x24, isKeyDown: true, isKeyUp: false, at: t0.addingTimeInterval(2.5)),
+        "native auto-repeat keyDown stays suppressed for as long as the X6 button is held"
+    )
+    require(
+        !gate.shouldSuppressMappedKey(keyCode: 0x31, isKeyDown: true, isKeyUp: false, at: t0.addingTimeInterval(0.01)),
+        "unrelated keys are never suppressed"
+    )
+    let releaseTime = t0.addingTimeInterval(2.6)
+    gate.noteMappedKeyEdge(keyCode: 0x24, isDown: false, at: releaseTime)
+    require(
+        gate.shouldSuppressMappedKey(keyCode: 0x24, isKeyDown: false, isKeyUp: true, at: releaseTime.addingTimeInterval(0.02)),
+        "trailing native keyUp after X6 button release is suppressed"
+    )
+    require(
+        !gate.shouldSuppressMappedKey(keyCode: 0x24, isKeyDown: true, isKeyUp: false, at: releaseTime.addingTimeInterval(0.03)),
+        "gate closes immediately once the trailing native keyUp is consumed"
+    )
+
+    // Fast tap where both HID down and up arrive before WindowServer delivers
+    // the native keyDown + keyUp pair.
+    let fastTap = Date(timeIntervalSinceReferenceDate: 2_000)
+    gate.noteMappedKeyEdge(keyCode: 0x7D, isDown: true, at: fastTap)
+    gate.noteMappedKeyEdge(keyCode: 0x7D, isDown: false, at: fastTap.addingTimeInterval(0.01))
+    require(
+        gate.shouldSuppressMappedKey(keyCode: 0x7D, isKeyDown: true, isKeyUp: false, at: fastTap.addingTimeInterval(0.02)),
+        "delayed native keyDown after a fast X6 tap is still suppressed"
+    )
+    require(
+        gate.shouldSuppressMappedKey(keyCode: 0x7D, isKeyDown: false, isKeyUp: true, at: fastTap.addingTimeInterval(0.03)),
+        "delayed native keyUp after a fast X6 tap is suppressed and closes the gate"
+    )
+    require(
+        !gate.shouldSuppressMappedKey(keyCode: 0x7D, isKeyDown: true, isKeyUp: false, at: fastTap.addingTimeInterval(0.04)),
+        "subsequent keyboard press after fast tap is not suppressed"
+    )
+
+    // Mapped consumer/system buttons keep the system event gate armed while held.
+    let sysTime = Date(timeIntervalSinceReferenceDate: 3_000)
+    gate.noteMappedSystemButtonEdge(isDown: true, at: sysTime)
+    require(
+        gate.isSearchOrSystemArmed(at: sysTime.addingTimeInterval(3.0)),
+        "held consumer/system button keeps system event suppression armed beyond the one-shot window"
+    )
+    gate.noteMappedSystemButtonEdge(isDown: false, at: sysTime.addingTimeInterval(3.0))
+    require(
+        gate.isSearchOrSystemArmed(at: sysTime.addingTimeInterval(4.0)),
+        "releasing a consumer/system button keeps suppression armed for the trailing native event"
+    )
+    require(
+        !gate.isSearchOrSystemArmed(at: sysTime.addingTimeInterval(4.6)),
+        "consumer/system suppression disarms after the release window"
+    )
+
+    print("PASS: X6 native event gate suppresses voice Search and mapped buttons without seizing")
+}
+
+runX6NativeEventGateSelfTests()

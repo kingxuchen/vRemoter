@@ -3,23 +3,105 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
+/// Pure decision state for suppressing native macOS events emitted by the X6
+/// remote while allowing vRemoter's own synthetic events through.
+///
+/// Because X6's primary HID usage is Keyboard (0x01/0x06), macOS refuses
+/// non-root `kIOHIDOptionsTypeSeizeDevice` with `kIOReturnNotPrivileged`.
+/// X6 therefore stays open in non-seized HID mode and relies on the event tap
+/// to drop native Search and remapped button events.
+struct X6NativeEventGate {
+    let suppressionDuration: TimeInterval
+    let keyReleaseGraceDuration: TimeInterval
+
+    private(set) var armedUntil = Date.distantPast
+    private(set) var heldSystemButtonCount = 0
+    private(set) var heldMappedKeyCodes = Set<UInt16>()
+    private(set) var pendingKeyReleaseUntil: [UInt16: Date] = [:]
+
+    init(
+        suppressionDuration: TimeInterval = 1.5,
+        keyReleaseGraceDuration: TimeInterval = 0.5
+    ) {
+        self.suppressionDuration = suppressionDuration
+        self.keyReleaseGraceDuration = keyReleaseGraceDuration
+    }
+
+    mutating func armSearch(at now: Date) {
+        let candidate = now.addingTimeInterval(suppressionDuration)
+        if candidate > armedUntil {
+            armedUntil = candidate
+        }
+    }
+
+    mutating func noteMappedSystemButtonEdge(isDown: Bool, at now: Date) {
+        if isDown {
+            heldSystemButtonCount += 1
+        } else {
+            heldSystemButtonCount = max(0, heldSystemButtonCount - 1)
+        }
+        armSearch(at: now)
+    }
+
+    mutating func noteMappedKeyEdge(keyCode: UInt16, isDown: Bool, at now: Date) {
+        if isDown {
+            heldMappedKeyCodes.insert(keyCode)
+            pendingKeyReleaseUntil[keyCode] = now.addingTimeInterval(suppressionDuration)
+        } else {
+            heldMappedKeyCodes.remove(keyCode)
+            pendingKeyReleaseUntil[keyCode] = now.addingTimeInterval(keyReleaseGraceDuration)
+        }
+    }
+
+    mutating func resetMappedState() {
+        heldSystemButtonCount = 0
+        heldMappedKeyCodes.removeAll()
+        pendingKeyReleaseUntil.removeAll()
+    }
+
+    mutating func resetAll() {
+        armedUntil = .distantPast
+        resetMappedState()
+    }
+
+    func isSearchOrSystemArmed(at now: Date) -> Bool {
+        heldSystemButtonCount > 0 || now <= armedUntil
+    }
+
+    mutating func shouldSuppressMappedKey(
+        keyCode: UInt16,
+        isKeyDown: Bool,
+        isKeyUp: Bool,
+        at now: Date
+    ) -> Bool {
+        guard isKeyDown || isKeyUp else { return false }
+        if heldMappedKeyCodes.contains(keyCode) {
+            return true
+        }
+        guard let until = pendingKeyReleaseUntil[keyCode] else { return false }
+        guard now <= until else {
+            pendingKeyReleaseUntil.removeValue(forKey: keyCode)
+            return false
+        }
+        if isKeyUp {
+            pendingKeyReleaseUntil.removeValue(forKey: keyCode)
+        }
+        return true
+    }
+}
 /// Suppresses the native macOS Search action immediately after X6 emits its
 /// Consumer AC Search usage. The gate is armed from the exact VID/PID-matched
 /// raw HID callback, so unrelated keyboard events are not globally remapped.
 final class X6SearchSuppressor {
     private var tapPort: CFMachPort?
-    private var armedUntil = Date.distantPast
+    private var gate = X6NativeEventGate()
     private var triggerKeysDown = Set<Int64>()
     private(set) var isAvailable = false
     var onTriggerDownObserved: ((Bool) -> Void)?
     var onTriggerUpObserved: ((Bool) -> Void)?
-    // X6 can deliver the HID report roughly a second before macOS emits the
-    // corresponding native Search action. Keep the gate open long enough for
-    // that delayed event, while still limiting suppression to the current
-    // voice-button gesture.
-    private let suppressionDuration: TimeInterval = 1.5
 
     func start() {
+        if tapPort != nil { return }
         guard AXIsProcessTrusted() else {
             isAvailable = false
             print("[X6-FILTER] accessibility permission unavailable")
@@ -69,14 +151,27 @@ final class X6SearchSuppressor {
             let keyCode = event.getIntegerValueField(
                 .keyboardEventKeycode
             )
-            let isArmed = Date() <= suppressor.armedUntil
+            let now = Date()
+            let rawKeyCode = UInt16(truncatingIfNeeded: keyCode)
+            if suppressor.gate.shouldSuppressMappedKey(
+                keyCode: rawKeyCode,
+                isKeyDown: type == .keyDown,
+                isKeyUp: type == .keyUp,
+                at: now
+            ) {
+                print(
+                    "[X6-FILTER] suppressed mapped key type=\(type.rawValue) " +
+                    "keyCode=0x\(String(keyCode, radix: 16))"
+                )
+                return nil
+            }
+
+            let isArmed = suppressor.gate.isSearchOrSystemArmed(at: now)
             let isSearchKey =
                 (type == .keyDown || type == .keyUp) && keyCode == 0xB1
             let isSearchSystemEvent = type.rawValue == 14
             let isDelayedX6Trigger = type == .flagsChanged
-                && AppStorage.shortcut?.matches(
-                    keyCode: UInt16(truncatingIfNeeded: keyCode)
-                ) == true
+                && AppStorage.shortcut?.matches(keyCode: rawKeyCode) == true
             if isArmed && (
                 isSearchKey || isSearchSystemEvent || isDelayedX6Trigger
             ) {
@@ -118,10 +213,22 @@ final class X6SearchSuppressor {
     }
 
     func arm() {
-        let candidate = Date().addingTimeInterval(suppressionDuration)
-        if candidate > armedUntil {
-            armedUntil = candidate
-        }
+        if tapPort == nil { start() }
+        gate.armSearch(at: Date())
+    }
+
+    func noteMappedKeyEdge(keyCode: CGKeyCode, isDown: Bool) {
+        if tapPort == nil { start() }
+        gate.noteMappedKeyEdge(keyCode: keyCode, isDown: isDown, at: Date())
+    }
+
+    func noteMappedSystemButtonEdge(isDown: Bool) {
+        if tapPort == nil { start() }
+        gate.noteMappedSystemButtonEdge(isDown: isDown, at: Date())
+    }
+
+    func resetMappedState() {
+        gate.resetMappedState()
     }
 
     func triggerConfigurationDidChange() {
@@ -131,7 +238,7 @@ final class X6SearchSuppressor {
     }
 
     func stop() {
-        armedUntil = .distantPast
+        gate.resetAll()
         triggerKeysDown.removeAll()
         if let tapPort {
             CGEvent.tapEnable(tap: tapPort, enable: false)
